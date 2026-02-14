@@ -12,7 +12,10 @@ RoleLogic then automatically assigns/removes Discord roles based on the synced l
 
 ## Setup
 
-Edit the environment variables directly in `compose.yml` before running.
+```bash
+cp .env.example .env
+# Edit .env with your values
+```
 
 ### Environment Variables
 
@@ -33,14 +36,13 @@ Edit the environment variables directly in `compose.yml` before running.
 ### Docker (recommended)
 
 ```bash
-docker build -t voter-role .    # build image (~18MB)
-docker compose up -d            # run container
+docker build -t voter-role .
+docker compose up -d
 ```
 
 ### From source
 
 ```bash
-cp .env.example .env   # edit .env with your values
 cargo run              # development
 cargo build --release  # production (~3MB binary)
 ```

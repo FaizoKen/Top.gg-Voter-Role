@@ -1,0 +1,20 @@
+services:
+  voter-role:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    environment:
+      # Server
+      - HOST=0.0.0.0
+      - PORT=${PORT:-3000}
+      # Top.gg Webhook
+      - TOPGG_WEBHOOK_SECRET=${TOPGG_WEBHOOK_SECRET}
+      - TOPGG_PROJECT_ID=${TOPGG_PROJECT_ID:-}
+      # RoleLogic API
+      - ROLELOGIC_TOKEN=${ROLELOGIC_TOKEN}
+      - ROLELOGIC_GUILD_ID=${ROLELOGIC_GUILD_ID}
+      - ROLELOGIC_ROLE_ID=${ROLELOGIC_ROLE_ID}
+      # Tuning
+      - SYNC_INTERVAL_SECS=${SYNC_INTERVAL_SECS:-60}
+      - VOTE_TTL_SECS=${VOTE_TTL_SECS:-86400}

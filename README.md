@@ -12,28 +12,29 @@ RoleLogic then automatically assigns/removes Discord roles based on the synced l
 
 ## Setup
 
-Edit the environment variables directly in `docker-compose.yml` before running.
+Edit the environment variables directly in `compose.yml` before running.
 
 ### Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `HOST` | No | `0.0.0.0` | Bind address |
-| `PORT` | No | `3000` | Bind port |
-| `TOPGG_WEBHOOK_SECRET` | Yes | — | Top.gg webhook secret (`whs_...`) |
-| `TOPGG_PROJECT_ID` | No | — | Filter votes by project ID or platform ID |
-| `ROLELOGIC_TOKEN` | Yes | — | RoleLogic API token (`rl_...`) |
-| `ROLELOGIC_GUILD_ID` | Yes | — | Discord server ID |
-| `ROLELOGIC_ROLE_ID` | Yes | — | Discord role ID to assign to voters |
-| `SYNC_INTERVAL_SECS` | No | `60` | Sync frequency to RoleLogic (seconds) |
-| `VOTE_TTL_SECS` | No | `86400` | How long votes stay valid (seconds) |
+| Variable               | Required | Default   | Description                               |
+| ---------------------- | -------- | --------- | ----------------------------------------- |
+| `HOST`                 | No       | `0.0.0.0` | Bind address                              |
+| `PORT`                 | No       | `3000`    | Bind port                                 |
+| `TOPGG_WEBHOOK_SECRET` | Yes      | —         | Top.gg webhook secret (`whs_...`)         |
+| `TOPGG_PROJECT_ID`     | No       | —         | Filter votes by project ID or platform ID |
+| `ROLELOGIC_TOKEN`      | Yes      | —         | RoleLogic API token (`rl_...`)            |
+| `ROLELOGIC_GUILD_ID`   | Yes      | —         | Discord server ID                         |
+| `ROLELOGIC_ROLE_ID`    | Yes      | —         | Discord role ID to assign to voters       |
+| `SYNC_INTERVAL_SECS`   | No       | `60`      | Sync frequency to RoleLogic (seconds)     |
+| `VOTE_TTL_SECS`        | No       | `86400`   | How long votes stay valid (seconds)       |
 
 ## Run
 
 ### Docker (recommended)
 
 ```bash
-docker compose up -d
+docker build -t voter-role .    # build image (~18MB)
+docker compose up -d            # run container
 ```
 
 ### From source
@@ -46,10 +47,10 @@ cargo build --release  # production (~3MB binary)
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
+| Method | Path             | Description             |
+| ------ | ---------------- | ----------------------- |
 | `POST` | `/webhook/topgg` | Top.gg webhook receiver |
-| `GET` | `/health` | Returns `{"voters": N}` |
+| `GET`  | `/health`        | Returns `{"voters": N}` |
 
 ## Top.gg Configuration
 

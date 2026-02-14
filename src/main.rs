@@ -156,6 +156,10 @@ async fn topgg_webhook(
 
             state.store.write().await.insert(user_id, Instant::now());
 
+            // Immediately sync to RoleLogic
+            let sync_state = state.clone();
+            tokio::spawn(async move { sync_to_rolelogic(&sync_state).await });
+
             StatusCode::OK
         }
         "webhook.test" => {
@@ -220,44 +224,46 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // ── Background Sync ──────────────────────────────────────────────────────────
 
 async fn sync_loop(state: AppState) {
-    let client = Client::new();
+    let mut interval = time::interval(state.config.sync_interval);
+    loop {
+        interval.tick().await;
+        sync_to_rolelogic(&state).await;
+    }
+}
+
+async fn sync_to_rolelogic(state: &AppState) {
+    // Purge expired entries and collect active user IDs
+    let user_ids: Vec<String> = {
+        let mut store = state.store.write().await;
+        store.retain(|_, ts| ts.elapsed() < state.config.vote_ttl);
+        store.keys().cloned().collect()
+    };
+
+    info!("Syncing {} voter(s) to RoleLogic", user_ids.len());
+
     let url = format!(
         "https://apirolelogic.faizo.net/api/role-link/{}/{}/users",
         state.config.rolelogic_guild_id, state.config.rolelogic_role_id
     );
 
-    let mut interval = time::interval(state.config.sync_interval);
-    loop {
-        interval.tick().await;
+    let res = Client::new()
+        .put(&url)
+        .header("Authorization", format!("Token {}", state.config.rolelogic_token))
+        .json(&user_ids)
+        .send()
+        .await;
 
-        // Purge expired entries and collect active user IDs
-        let user_ids: Vec<String> = {
-            let mut store = state.store.write().await;
-            store.retain(|_, ts| ts.elapsed() < state.config.vote_ttl);
-            store.keys().cloned().collect()
-        };
-
-        info!("Syncing {} voter(s) to RoleLogic", user_ids.len());
-
-        let res = client
-            .put(&url)
-            .header("Authorization", format!("Token {}", state.config.rolelogic_token))
-            .json(&user_ids)
-            .send()
-            .await;
-
-        match res {
-            Ok(resp) if resp.status().is_success() => {
-                info!("RoleLogic sync OK");
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                error!("RoleLogic sync failed ({status}): {text}");
-            }
-            Err(e) => {
-                error!("RoleLogic sync request error: {e}");
-            }
+    match res {
+        Ok(resp) if resp.status().is_success() => {
+            info!("RoleLogic sync OK");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            error!("RoleLogic sync failed ({status}): {text}");
+        }
+        Err(e) => {
+            error!("RoleLogic sync request error: {e}");
         }
     }
 }

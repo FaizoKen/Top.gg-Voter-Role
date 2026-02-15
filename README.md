@@ -28,7 +28,7 @@ cp .env.example .env
 | `ROLELOGIC_TOKEN`      | Yes      | —         | RoleLogic API token (`rl_...`)            |
 | `ROLELOGIC_GUILD_ID`   | Yes      | —         | Discord server ID                         |
 | `ROLELOGIC_ROLE_ID`    | Yes      | —         | Discord role ID to assign to voters       |
-| `SYNC_INTERVAL_SECS`   | No       | `60`      | Sync frequency to RoleLogic (seconds)     |
+| `SYNC_INTERVAL_SECS`   | No       | `86400`   | Sync frequency to RoleLogic (seconds)     |
 | `VOTE_TTL_SECS`        | No       | `86400`   | How long votes stay valid (seconds)       |
 
 ## Run

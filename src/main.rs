@@ -339,7 +339,7 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
     let start_date =
         (Utc::now() - chrono::TimeDelta::seconds(vote_ttl_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let client = Client::new();
-    let mut user_ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut cursor: Option<String> = None;
 
     loop {
@@ -347,12 +347,12 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
             .get("https://top.gg/api/v1/projects/@me/votes")
             .header("User-Agent", "curl/8.11.1")
             .header("Accept", "*/*")
-            .header("Authorization", format!("Bearer {}", config.topgg_token));
+            .header("Authorization", format!("Bearer {}", config.topgg_token))
+            .query(&[("startDate", start_date.as_str())]);
 
-        request = match cursor {
-            Some(ref c) => request.query(&[("cursor", c.as_str())]),
-            None => request.query(&[("startDate", start_date.as_str())]),
-        };
+        if let Some(ref c) = cursor {
+            request = request.query(&[("cursor", c.as_str())]);
+        }
 
         let resp = request
             .send()
@@ -370,24 +370,36 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
             .await
             .map_err(|e| format!("top.gg parse error: {e}"))?;
 
-        for entry in &page.data {
-            user_ids.push(entry.platform_id.clone());
+        if page.data.is_empty() {
+            break;
+        }
+
+        let mut new_entries = false;
+        for entry in page.data {
+            if seen.insert(entry.platform_id.clone()) {
+                new_entries = true;
+            }
+        }
+
+        if !new_entries {
+            break; // All entries already seen, stop paginating
         }
 
         match page.cursor {
-            Some(c) if !page.data.is_empty() => cursor = Some(c),
-            _ => break,
+            Some(c) => cursor = Some(c),
+            None => break,
         }
     }
 
-    Ok(user_ids)
+    Ok(seen.into_iter().collect())
 }
 
 // ── Background Sync ──────────────────────────────────────────────────────────
 
 async fn sync_loop(state: AppState) {
+    let mut interval = time::interval(state.config.sync_interval);
     loop {
-        time::sleep(state.config.sync_interval).await;
+        interval.tick().await;
         sync_to_rolelogic(&state).await;
     }
 }

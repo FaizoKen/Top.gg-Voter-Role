@@ -9,6 +9,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::Sha256;
+use chrono::Utc;
 use std::{
     collections::HashMap,
     env,
@@ -32,6 +33,7 @@ struct AppState {
 #[derive(Clone)]
 struct AppConfig {
     topgg_secret: String,
+    topgg_token: String,
     topgg_project_id: Option<String>,
     rolelogic_token: String,
     rolelogic_guild_id: String,
@@ -66,6 +68,24 @@ struct UserInfo {
     platform_id: String,
 }
 
+// ── Top.gg API Response ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TopggVotesResponse {
+    cursor: Option<String>,
+    data: Vec<TopggVoteEntry>,
+}
+
+#[derive(Deserialize)]
+struct TopggVoteEntry {
+    user: TopggVoteUser,
+}
+
+#[derive(Deserialize)]
+struct TopggVoteUser {
+    platform_id: String,
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -75,6 +95,7 @@ async fn main() {
 
     let config = AppConfig {
         topgg_secret: required_env("TOPGG_WEBHOOK_SECRET"),
+        topgg_token: required_env("TOPGG_TOKEN"),
         topgg_project_id: optional_env("TOPGG_PROJECT_ID"),
         rolelogic_token: required_env("ROLELOGIC_TOKEN"),
         rolelogic_guild_id: required_env("ROLELOGIC_GUILD_ID"),
@@ -316,6 +337,55 @@ fn schedule_removal(state: &AppState, user_id: String, voted_at: Instant) {
     });
 }
 
+// ── Top.gg Vote Fetching ─────────────────────────────────────────────────────
+
+async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
+    let vote_ttl_secs = config.vote_ttl.as_secs() as i64;
+    let start_date = (Utc::now() - chrono::TimeDelta::seconds(vote_ttl_secs)).to_rfc3339();
+    let client = Client::new();
+    let mut user_ids = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let mut url = format!(
+            "https://top.gg/api/v1/projects/@me/votes?startDate={}",
+            start_date
+        );
+        if let Some(ref c) = cursor {
+            url = format!("https://top.gg/api/v1/projects/@me/votes?cursor={}", c);
+        }
+
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", config.topgg_token))
+            .send()
+            .await
+            .map_err(|e| format!("top.gg request error: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("top.gg API error ({status}): {text}"));
+        }
+
+        let page: TopggVotesResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("top.gg parse error: {e}"))?;
+
+        for entry in &page.data {
+            user_ids.push(entry.user.platform_id.clone());
+        }
+
+        match page.cursor {
+            Some(c) if !page.data.is_empty() => cursor = Some(c),
+            _ => break,
+        }
+    }
+
+    Ok(user_ids)
+}
+
 // ── Background Sync ──────────────────────────────────────────────────────────
 
 async fn sync_loop(state: AppState) {
@@ -327,13 +397,29 @@ async fn sync_loop(state: AppState) {
 }
 
 async fn sync_to_rolelogic(state: &AppState) {
-    // Purge expired entries and collect active user IDs
-    let user_ids: Vec<String> = {
-        let mut store = state.store.write().await;
-        store.retain(|_, ts| ts.elapsed() < state.config.vote_ttl);
-        store.keys().cloned().collect()
+    // 1. Fetch recent votes from top.gg
+    let user_ids = match fetch_topgg_votes(&state.config).await {
+        Ok(ids) => {
+            info!("Fetched {} voter(s) from top.gg", ids.len());
+            ids
+        }
+        Err(e) => {
+            error!("Failed to fetch votes from top.gg: {e}");
+            return;
+        }
     };
 
+    // 2. Update in-memory store with fetched votes
+    {
+        let mut store = state.store.write().await;
+        store.clear();
+        let now = Instant::now();
+        for id in &user_ids {
+            store.insert(id.clone(), now);
+        }
+    }
+
+    // 3. Sync to RoleLogic
     info!("Syncing {} voter(s) to RoleLogic", user_ids.len());
 
     let url = format!(

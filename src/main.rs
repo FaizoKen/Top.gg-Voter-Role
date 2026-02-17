@@ -343,17 +343,18 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
     let mut cursor: Option<String> = None;
 
     loop {
-        let mut url = format!(
-            "https://top.gg/api/v1/projects/@me/votes?startDate={}",
-            start_date
-        );
-        if let Some(ref c) = cursor {
-            url = format!("https://top.gg/api/v1/projects/@me/votes?cursor={}", c);
-        }
+        let mut request = client
+            .get("https://top.gg/api/v1/projects/@me/votes")
+            .header("User-Agent", "curl/8.11.1")
+            .header("Accept", "*/*")
+            .header("Authorization", format!("Bearer {}", config.topgg_token));
 
-        let resp = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", config.topgg_token))
+        request = match cursor {
+            Some(ref c) => request.query(&[("cursor", c.as_str())]),
+            None => request.query(&[("startDate", start_date.as_str())]),
+        };
+
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("top.gg request error: {e}"))?;
@@ -385,9 +386,8 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
 // ── Background Sync ──────────────────────────────────────────────────────────
 
 async fn sync_loop(state: AppState) {
-    let mut interval = time::interval(state.config.sync_interval);
     loop {
-        interval.tick().await;
+        time::sleep(state.config.sync_interval).await;
         sync_to_rolelogic(&state).await;
     }
 }

@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::Sha256;
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use std::{
     collections::HashMap,
     env,
@@ -341,7 +341,8 @@ fn schedule_removal(state: &AppState, user_id: String, voted_at: Instant) {
 
 async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
     let vote_ttl_secs = config.vote_ttl.as_secs() as i64;
-    let start_date = (Utc::now() - chrono::TimeDelta::seconds(vote_ttl_secs)).to_rfc3339();
+    let start_date =
+        (Utc::now() - chrono::TimeDelta::seconds(vote_ttl_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let client = Client::new();
     let mut user_ids = Vec::new();
     let mut cursor: Option<String> = None;

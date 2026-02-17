@@ -154,11 +154,16 @@ async fn topgg_webhook(
             let user_id = data.user.platform_id;
             info!("Vote received from user {user_id}");
 
-            state.store.write().await.insert(user_id, Instant::now());
+            let voted_at = Instant::now();
+            state.store.write().await.insert(user_id.clone(), voted_at);
 
-            // Immediately sync to RoleLogic
-            let sync_state = state.clone();
-            tokio::spawn(async move { sync_to_rolelogic(&sync_state).await });
+            // Add single member to RoleLogic
+            let add_state = state.clone();
+            let add_user_id = user_id.clone();
+            tokio::spawn(async move { add_member(&add_state, &add_user_id).await });
+
+            // Schedule removal after TTL expires
+            schedule_removal(&state, user_id, voted_at);
 
             StatusCode::OK
         }
@@ -219,6 +224,96 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+// ── Single Member API ────────────────────────────────────────────────────────
+
+async fn add_member(state: &AppState, user_id: &str) {
+    let url = format!(
+        "https://apirolelogic.faizo.net/api/role-link/{}/{}/users/{}",
+        state.config.rolelogic_guild_id, state.config.rolelogic_role_id, user_id
+    );
+
+    let res = Client::new()
+        .post(&url)
+        .header(
+            "Authorization",
+            format!("Token {}", state.config.rolelogic_token),
+        )
+        .send()
+        .await;
+
+    match res {
+        Ok(resp) if resp.status().is_success() => {
+            info!("RoleLogic add member OK: {user_id}");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            error!("RoleLogic add member failed ({status}): {text}");
+        }
+        Err(e) => {
+            error!("RoleLogic add member request error: {e}");
+        }
+    }
+}
+
+async fn remove_member(state: &AppState, user_id: &str) {
+    let url = format!(
+        "https://apirolelogic.faizo.net/api/role-link/{}/{}/users/{}",
+        state.config.rolelogic_guild_id, state.config.rolelogic_role_id, user_id
+    );
+
+    let res = Client::new()
+        .delete(&url)
+        .header(
+            "Authorization",
+            format!("Token {}", state.config.rolelogic_token),
+        )
+        .send()
+        .await;
+
+    match res {
+        Ok(resp) if resp.status().is_success() => {
+            info!("RoleLogic remove member OK: {user_id}");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            error!("RoleLogic remove member failed ({status}): {text}");
+        }
+        Err(e) => {
+            error!("RoleLogic remove member request error: {e}");
+        }
+    }
+}
+
+fn schedule_removal(state: &AppState, user_id: String, voted_at: Instant) {
+    let state = state.clone();
+    let ttl = state.config.vote_ttl;
+    tokio::spawn(async move {
+        time::sleep(ttl).await;
+
+        // Check if this vote is still the active one (user hasn't re-voted)
+        let should_remove = {
+            let mut store = state.store.write().await;
+            if let Some(&stored_at) = store.get(&user_id) {
+                if stored_at == voted_at {
+                    store.remove(&user_id);
+                    true
+                } else {
+                    false // User re-voted; the newer timer will handle removal
+                }
+            } else {
+                false // Already removed
+            }
+        };
+
+        if should_remove {
+            info!("TTL expired for user {user_id}, removing from RoleLogic");
+            remove_member(&state, &user_id).await;
+        }
+    });
 }
 
 // ── Background Sync ──────────────────────────────────────────────────────────

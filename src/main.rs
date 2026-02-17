@@ -34,7 +34,6 @@ struct AppState {
 struct AppConfig {
     topgg_secret: String,
     topgg_token: String,
-    topgg_project_id: Option<String>,
     rolelogic_token: String,
     rolelogic_guild_id: String,
     rolelogic_role_id: String,
@@ -53,14 +52,7 @@ struct WebhookPayload {
 
 #[derive(Deserialize)]
 struct VoteData {
-    project: Option<ProjectInfo>,
     user: UserInfo,
-}
-
-#[derive(Deserialize)]
-struct ProjectInfo {
-    id: Option<String>,
-    platform_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,7 +83,6 @@ async fn main() {
     let config = AppConfig {
         topgg_secret: required_env("TOPGG_WEBHOOK_SECRET"),
         topgg_token: required_env("TOPGG_TOKEN"),
-        topgg_project_id: optional_env("TOPGG_PROJECT_ID"),
         rolelogic_token: required_env("ROLELOGIC_TOKEN"),
         rolelogic_guild_id: required_env("ROLELOGIC_GUILD_ID"),
         rolelogic_role_id: required_env("ROLELOGIC_ROLE_ID"),
@@ -118,9 +109,6 @@ async fn main() {
     let addr = format!("{host}:{port}");
 
     info!("Listening on {addr}");
-    if let Some(ref project_id) = config.topgg_project_id {
-        info!("Filtering votes for project {project_id}");
-    }
 
     let listener = TcpListener::bind(&addr).await.expect("failed to bind");
     axum::serve(listener, app).await.expect("server error");
@@ -155,17 +143,6 @@ async fn topgg_webhook(
                 Some(d) => d,
                 None => return StatusCode::BAD_REQUEST,
             };
-
-            // Filter by project ID if configured (matches against project.id or project.platform_id)
-            if let Some(ref expected) = state.config.topgg_project_id {
-                let matches = data.project.as_ref().is_some_and(|p| {
-                    p.id.as_deref() == Some(expected.as_str())
-                        || p.platform_id.as_deref() == Some(expected.as_str())
-                });
-                if !matches {
-                    return StatusCode::OK; // Silently ignore votes for other projects
-                }
-            }
 
             let user_id = data.user.platform_id;
             info!("Vote received from user {user_id}");
@@ -345,8 +322,6 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
     loop {
         let mut request = client
             .get("https://top.gg/api/v1/projects/@me/votes")
-            .header("User-Agent", "curl/8.11.1")
-            .header("Accept", "*/*")
             .header("Authorization", format!("Bearer {}", config.topgg_token))
             .query(&[("startDate", start_date.as_str())]);
 
@@ -468,10 +443,6 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
 fn required_env(key: &str) -> String {
     env::var(key).unwrap_or_else(|_| panic!("{key} must be set"))
-}
-
-fn optional_env(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {

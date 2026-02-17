@@ -24,7 +24,6 @@ cp .env.example .env
 | `HOST`                 | No       | `0.0.0.0` | Bind address                              |
 | `PORT`                 | No       | `3000`    | Bind port                                 |
 | `TOPGG_WEBHOOK_SECRET` | Yes      | —         | Top.gg webhook secret (`whs_...`)         |
-| `TOPGG_PROJECT_ID`     | No       | —         | Filter votes by project ID or platform ID |
 | `ROLELOGIC_TOKEN`      | Yes      | —         | RoleLogic API token (`rl_...`)            |
 | `ROLELOGIC_GUILD_ID`   | Yes      | —         | Discord server ID                         |
 | `ROLELOGIC_ROLE_ID`    | Yes      | —         | Discord role ID to assign to voters       |

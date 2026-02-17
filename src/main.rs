@@ -78,11 +78,6 @@ struct TopggVotesResponse {
 
 #[derive(Deserialize)]
 struct TopggVoteEntry {
-    user: TopggVoteUser,
-}
-
-#[derive(Deserialize)]
-struct TopggVoteUser {
     platform_id: String,
 }
 
@@ -375,7 +370,7 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
             .map_err(|e| format!("top.gg parse error: {e}"))?;
 
         for entry in &page.data {
-            user_ids.push(entry.user.platform_id.clone());
+            user_ids.push(entry.platform_id.clone());
         }
 
         match page.cursor {

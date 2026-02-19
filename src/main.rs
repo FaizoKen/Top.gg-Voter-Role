@@ -223,7 +223,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 async fn add_member(state: &AppState, user_id: &str) {
     let url = format!(
-        "https://apirolelogic.faizo.net/api/role-link/{}/{}/users/{}",
+        "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users/{}",
         state.config.rolelogic_guild_id, state.config.rolelogic_role_id, user_id
     );
 
@@ -253,7 +253,7 @@ async fn add_member(state: &AppState, user_id: &str) {
 
 async fn remove_member(state: &AppState, user_id: &str) {
     let url = format!(
-        "https://apirolelogic.faizo.net/api/role-link/{}/{}/users/{}",
+        "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users/{}",
         state.config.rolelogic_guild_id, state.config.rolelogic_role_id, user_id
     );
 
@@ -406,7 +406,7 @@ async fn sync_to_rolelogic(state: &AppState) {
     info!("Syncing {} voter(s) to RoleLogic", user_ids.len());
 
     let url = format!(
-        "https://apirolelogic.faizo.net/api/role-link/{}/{}/users",
+        "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users",
         state.config.rolelogic_guild_id, state.config.rolelogic_role_id
     );
 

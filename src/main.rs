@@ -86,7 +86,7 @@ async fn main() {
         rolelogic_token: required_env("ROLELOGIC_TOKEN"),
         rolelogic_guild_id: required_env("ROLELOGIC_GUILD_ID"),
         rolelogic_role_id: required_env("ROLELOGIC_ROLE_ID"),
-        sync_interval: Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 86400)),
+        sync_interval: Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 43200)),
         vote_ttl: Duration::from_secs(env_or("VOTE_TTL_SECS", 86400)),
     };
 

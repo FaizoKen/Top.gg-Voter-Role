@@ -11,3 +11,5 @@ services:
       # Top.gg Webhook
       - TOPGG_WEBHOOK_SECRET=${TOPGG_WEBHOOK_SECRET}
       - TOPGG_TOKEN=${TOPGG_TOKEN}
+      # Tuning
+      - SYNC_INTERVAL_SECS=${SYNC_INTERVAL_SECS:-43200}

@@ -36,12 +36,12 @@ struct AppState {
 struct AppConfig {
     topgg_secret: String,
     topgg_token: String,
+    sync_interval: Duration,
 }
 
 #[derive(Clone)]
 struct RuntimeConfig {
     vote_ttl: Duration,
-    sync_interval: Duration,
 }
 
 #[derive(Clone, Default)]
@@ -99,11 +99,11 @@ async fn main() {
     let config = AppConfig {
         topgg_secret: required_env("TOPGG_WEBHOOK_SECRET"),
         topgg_token: required_env("TOPGG_TOKEN"),
+        sync_interval: Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 43200)),
     };
 
     let runtime = Arc::new(RwLock::new(RuntimeConfig {
         vote_ttl: Duration::from_secs(86400),
-        sync_interval: Duration::from_secs(43200),
     }));
 
     let state = AppState {
@@ -316,7 +316,6 @@ struct PluginConfigRequest {
 #[derive(Deserialize)]
 struct PluginConfigValues {
     vote_ttl_hours: Option<f64>,
-    sync_interval_hours: Option<f64>,
 }
 
 async fn plugin_schema(
@@ -324,7 +323,6 @@ async fn plugin_schema(
 ) -> Json<SchemaResponse> {
     let runtime = state.runtime.read().await;
     let vote_ttl_hours = runtime.vote_ttl.as_secs_f64() / 3600.0;
-    let sync_interval_hours = runtime.sync_interval.as_secs_f64() / 3600.0;
 
     Json(SchemaResponse {
         version: 1,
@@ -340,18 +338,10 @@ async fn plugin_schema(
                     description: "How long a vote lasts before the role is removed".to_string(),
                     validation: serde_json::json!({"required": true, "min": 1, "max": 168}),
                 },
-                SchemaField {
-                    field_type: "number".to_string(),
-                    key: "sync_interval_hours".to_string(),
-                    label: "Sync Interval (hours)".to_string(),
-                    description: "How often to re-sync all voters with RoleLogic".to_string(),
-                    validation: serde_json::json!({"required": true, "min": 1, "max": 168}),
-                },
             ],
         }],
         values: serde_json::json!({
             "vote_ttl_hours": vote_ttl_hours,
-            "sync_interval_hours": sync_interval_hours,
         }),
     })
 }
@@ -374,10 +364,6 @@ async fn plugin_config_update(
     if let Some(hours) = payload.config.vote_ttl_hours {
         runtime.vote_ttl = Duration::from_secs_f64(hours * 3600.0);
         info!("Updated vote_ttl to {} hours", hours);
-    }
-    if let Some(hours) = payload.config.sync_interval_hours {
-        runtime.sync_interval = Duration::from_secs_f64(hours * 3600.0);
-        info!("Updated sync_interval to {} hours", hours);
     }
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
@@ -563,8 +549,7 @@ async fn fetch_topgg_votes(config: &AppConfig, vote_ttl: Duration) -> Result<Vec
 
 async fn sync_loop(state: AppState) {
     loop {
-        let interval_duration = state.runtime.read().await.sync_interval;
-        time::sleep(interval_duration).await;
+        time::sleep(state.config.sync_interval).await;
         sync_to_rolelogic(&state).await;
     }
 }

@@ -295,15 +295,12 @@ struct PluginDeleteRequest {
 
 async fn plugin_schema(
     State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<SchemaResponse>, StatusCode> {
-    verify_rolelogic_token(&headers, &state.config.rolelogic_token)?;
-
+) -> Json<SchemaResponse> {
     let runtime = state.runtime.read().await;
     let vote_ttl_hours = runtime.vote_ttl.as_secs_f64() / 3600.0;
     let sync_interval_hours = runtime.sync_interval.as_secs_f64() / 3600.0;
 
-    Ok(Json(SchemaResponse {
+    Json(SchemaResponse {
         version: 1,
         name: "VoterRole".to_string(),
         description: "Assigns a Discord role to users who vote on Top.gg. The role is automatically removed when the vote expires.".to_string(),
@@ -330,7 +327,7 @@ async fn plugin_schema(
             "vote_ttl_hours": vote_ttl_hours,
             "sync_interval_hours": sync_interval_hours,
         }),
-    }))
+    })
 }
 
 async fn plugin_config_update(

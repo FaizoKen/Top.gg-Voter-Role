@@ -29,13 +29,13 @@ struct AppState {
     store: VoterStore,
     config: AppConfig,
     runtime: Arc<RwLock<RuntimeConfig>>,
+    rolelogic_token: Arc<RwLock<String>>,
 }
 
 #[derive(Clone)]
 struct AppConfig {
     topgg_secret: String,
     topgg_token: String,
-    rolelogic_token: String,
     rolelogic_guild_id: String,
     rolelogic_role_id: String,
 }
@@ -88,7 +88,6 @@ async fn main() {
     let config = AppConfig {
         topgg_secret: required_env("TOPGG_WEBHOOK_SECRET"),
         topgg_token: required_env("TOPGG_TOKEN"),
-        rolelogic_token: required_env("ROLELOGIC_TOKEN"),
         rolelogic_guild_id: required_env("ROLELOGIC_GUILD_ID"),
         rolelogic_role_id: required_env("ROLELOGIC_ROLE_ID"),
     };
@@ -102,6 +101,7 @@ async fn main() {
         store: Arc::new(RwLock::new(HashMap::new())),
         config: config.clone(),
         runtime,
+        rolelogic_token: Arc::new(RwLock::new(String::new())),
     };
 
     // Spawn background sync task
@@ -232,21 +232,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ── Plugin Server Endpoints ──────────────────────────────────────────────────
 
-fn verify_rolelogic_token(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
-    let auth = headers
+fn extract_rolelogic_token(headers: &HeaderMap) -> Option<String> {
+    headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .and_then(|auth| auth.strip_prefix("Token "))
+        .map(|t| t.to_string())
+}
 
-    let token = auth
-        .strip_prefix("Token ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    if token != expected {
-        return Err(StatusCode::UNAUTHORIZED);
+async fn save_rolelogic_token(state: &AppState, headers: &HeaderMap) {
+    if let Some(token) = extract_rolelogic_token(headers) {
+        let mut current = state.rolelogic_token.write().await;
+        if *current != token {
+            info!("Updated RoleLogic token from incoming request");
+            *current = token;
+        }
     }
-
-    Ok(())
 }
 
 #[derive(Serialize)]
@@ -287,15 +288,12 @@ struct PluginConfigValues {
     sync_interval_hours: Option<f64>,
 }
 
-#[derive(Deserialize)]
-struct PluginDeleteRequest {
-    guild_id: String,
-    role_id: String,
-}
 
 async fn plugin_schema(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Json<SchemaResponse> {
+    save_rolelogic_token(&state, &headers).await;
     let runtime = state.runtime.read().await;
     let vote_ttl_hours = runtime.vote_ttl.as_secs_f64() / 3600.0;
     let sync_interval_hours = runtime.sync_interval.as_secs_f64() / 3600.0;
@@ -335,7 +333,7 @@ async fn plugin_config_update(
     headers: HeaderMap,
     Json(payload): Json<PluginConfigRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    verify_rolelogic_token(&headers, &state.config.rolelogic_token)?;
+    save_rolelogic_token(&state, &headers).await;
 
     if payload.guild_id != state.config.rolelogic_guild_id
         || payload.role_id != state.config.rolelogic_role_id
@@ -360,12 +358,18 @@ async fn plugin_config_update(
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
+#[derive(Deserialize)]
+struct PluginDeleteRequest {
+    guild_id: String,
+    role_id: String,
+}
+
 async fn plugin_config_delete(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<PluginDeleteRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    verify_rolelogic_token(&headers, &state.config.rolelogic_token)?;
+    save_rolelogic_token(&state, &headers).await;
 
     info!(
         "Received config delete notification for guild={} role={}",
@@ -387,7 +391,7 @@ async fn add_member(state: &AppState, user_id: &str) {
         .post(&url)
         .header(
             "Authorization",
-            format!("Token {}", state.config.rolelogic_token),
+            format!("Token {}", state.rolelogic_token.read().await),
         )
         .send()
         .await;
@@ -417,7 +421,7 @@ async fn remove_member(state: &AppState, user_id: &str) {
         .delete(&url)
         .header(
             "Authorization",
-            format!("Token {}", state.config.rolelogic_token),
+            format!("Token {}", state.rolelogic_token.read().await),
         )
         .send()
         .await;
@@ -569,7 +573,7 @@ async fn sync_to_rolelogic(state: &AppState) {
 
     let res = Client::new()
         .put(&url)
-        .header("Authorization", format!("Token {}", state.config.rolelogic_token))
+        .header("Authorization", format!("Token {}", state.rolelogic_token.read().await))
         .json(&user_ids)
         .send()
         .await;

@@ -24,7 +24,6 @@ cp .env.example .env
 | `HOST`                 | No       | `0.0.0.0` | Bind address                          |
 | `PORT`                 | No       | `3000`    | Bind port                             |
 | `TOPGG_WEBHOOK_SECRET` | Yes      | —         | Top.gg webhook secret (`whs_...`)     |
-| `ROLELOGIC_TOKEN`      | Yes      | —         | RoleLogic API token (`rl_...`)        |
 | `ROLELOGIC_GUILD_ID`   | Yes      | —         | Discord server ID                     |
 | `ROLELOGIC_ROLE_ID`    | Yes      | —         | Discord role ID to assign to voters   |
 | `SYNC_INTERVAL_SECS`   | No       | `43200`   | Sync frequency to RoleLogic (seconds) |

@@ -1,15 +1,30 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: voter_role
+      POSTGRES_USER: voter_role
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
   voter-role:
     build: .
     restart: unless-stopped
+    depends_on:
+      - postgres
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
     environment:
       # Server
       - HOST=0.0.0.0
       - PORT=${PORT:-3000}
-      # Top.gg Webhook
-      - TOPGG_WEBHOOK_SECRET=${TOPGG_WEBHOOK_SECRET}
-      - TOPGG_TOKEN=${TOPGG_TOKEN}
+      # Database
+      - DATABASE_URL=postgres://voter_role:${POSTGRES_PASSWORD:-changeme}@postgres:5432/voter_role
       # Tuning
       - SYNC_INTERVAL_SECS=${SYNC_INTERVAL_SECS:-43200}
+      - PUBLIC_URL=${PUBLIC_URL:-https://your-domain.com}
+
+volumes:
+  pgdata:

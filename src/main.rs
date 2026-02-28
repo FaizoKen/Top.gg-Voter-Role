@@ -1,128 +1,74 @@
+mod crypto;
+mod db;
+mod handlers;
+mod models;
+mod sync;
+
 use axum::{
-    Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    Router,
     routing::{get, post},
 };
-use hmac::{Hmac, Mac};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use chrono::{SecondsFormat, Utc};
-use std::{
-    collections::HashMap,
-    env,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::{net::TcpListener, sync::RwLock, time};
-use tracing::{error, info, warn};
+use sqlx::postgres::PgPoolOptions;
+use std::{env, time::Duration};
+use tokio::net::TcpListener;
+use tracing::info;
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-type VoterStore = Arc<RwLock<HashMap<String, Instant>>>;
-type HmacSha256 = Hmac<Sha256>;
+// ── AppState ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct AppState {
-    store: VoterStore,
-    config: AppConfig,
-    runtime: Arc<RwLock<RuntimeConfig>>,
-    rolelogic: Arc<RwLock<RoleLogicConfig>>,
+pub struct AppState {
+    pub db: sqlx::PgPool,
+    pub http: reqwest::Client,
+    pub sync_interval: Duration,
+    pub public_url: String,
 }
 
-#[derive(Clone)]
-struct AppConfig {
-    topgg_secret: String,
-    topgg_token: String,
-    sync_interval: Duration,
-}
-
-#[derive(Clone)]
-struct RuntimeConfig {
-    vote_ttl: Duration,
-}
-
-#[derive(Clone, Default)]
-struct RoleLogicConfig {
-    token: String,
-    guild_id: String,
-    role_id: String,
-}
-
-impl RoleLogicConfig {
-    fn is_registered(&self) -> bool {
-        !self.token.is_empty()
-    }
-}
-
-// ── Top.gg Webhook Payload ───────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct WebhookPayload {
-    #[serde(rename = "type")]
-    event_type: String,
-    data: Option<VoteData>,
-}
-
-#[derive(Deserialize)]
-struct VoteData {
-    user: UserInfo,
-}
-
-#[derive(Deserialize)]
-struct UserInfo {
-    platform_id: String,
-}
-
-// ── Top.gg API Response ─────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct TopggVotesResponse {
-    cursor: Option<String>,
-    data: Vec<TopggVoteEntry>,
-}
-
-#[derive(Deserialize)]
-struct TopggVoteEntry {
-    platform_id: String,
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
+// ── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     let _ = dotenvy::dotenv();
 
-    let config = AppConfig {
-        topgg_secret: required_env("TOPGG_WEBHOOK_SECRET"),
-        topgg_token: required_env("TOPGG_TOKEN"),
-        sync_interval: Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 43200)),
-    };
+    let database_url = required_env("DATABASE_URL");
+    let sync_interval = Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 43200));
 
-    let runtime = Arc::new(RwLock::new(RuntimeConfig {
-        vote_ttl: Duration::from_secs(86400),
-    }));
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("failed to connect to database");
+
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("failed to run migrations");
+
+    let public_url = env_or_str("PUBLIC_URL", "https://example.com");
 
     let state = AppState {
-        store: Arc::new(RwLock::new(HashMap::new())),
-        config: config.clone(),
-        runtime,
-        rolelogic: Arc::new(RwLock::new(RoleLogicConfig::default())),
+        db: pool,
+        http: reqwest::Client::new(),
+        sync_interval,
+        public_url,
     };
 
-    // Spawn background sync task
+    // Spawn background tasks
     let sync_state = state.clone();
-    tokio::spawn(async move { sync_loop(sync_state).await });
+    tokio::spawn(async move { sync::sync_loop(sync_state).await });
+
+    let cleanup_state = state.clone();
+    tokio::spawn(async move { sync::ttl_cleanup_loop(cleanup_state).await });
 
     let app = Router::new()
-        .route("/webhook/topgg", post(topgg_webhook))
-        .route("/health", get(health))
-        .route("/register", post(plugin_register))
-        .route("/schema", get(plugin_schema))
-        .route("/config", post(plugin_config_update).delete(plugin_config_delete))
+        .route("/webhook/topgg/{registration_id}", post(handlers::topgg_webhook))
+        .route("/health", get(handlers::health))
+        .route("/register", post(handlers::plugin_register))
+        .route("/schema", get(handlers::plugin_schema))
+        .route(
+            "/config",
+            post(handlers::plugin_config_update).delete(handlers::plugin_config_delete),
+        )
         .with_state(state);
 
     let host = env_or_str("HOST", "0.0.0.0");
@@ -135,497 +81,7 @@ async fn main() {
     axum::serve(listener, app).await.expect("server error");
 }
 
-// ── Webhook Handler ──────────────────────────────────────────────────────────
-
-async fn topgg_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    // 1. Verify HMAC signature
-    if let Err(e) = verify_signature(&headers, &body, &state.config.topgg_secret) {
-        warn!("Webhook signature verification failed: {e}");
-        return StatusCode::UNAUTHORIZED;
-    }
-
-    // 2. Parse payload
-    let payload: WebhookPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Invalid webhook payload: {e}");
-            return StatusCode::BAD_REQUEST;
-        }
-    };
-
-    // 3. Handle event type
-    match payload.event_type.as_str() {
-        "vote.create" => {
-            let data = match payload.data {
-                Some(d) => d,
-                None => return StatusCode::BAD_REQUEST,
-            };
-
-            let user_id = data.user.platform_id;
-            info!("Vote received from user {user_id}");
-
-            let voted_at = Instant::now();
-            state.store.write().await.insert(user_id.clone(), voted_at);
-
-            // Add single member to RoleLogic
-            let add_state = state.clone();
-            let add_user_id = user_id.clone();
-            tokio::spawn(async move { add_member(&add_state, &add_user_id).await });
-
-            // Schedule removal after TTL expires
-            schedule_removal(&state, user_id, voted_at);
-
-            StatusCode::OK
-        }
-        "webhook.test" => {
-            info!("Test webhook received");
-            StatusCode::OK
-        }
-        other => {
-            warn!("Unknown webhook event type: {other}");
-            StatusCode::OK
-        }
-    }
-}
-
-// ── Signature Verification ───────────────────────────────────────────────────
-
-fn verify_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> Result<(), String> {
-    let sig_header = headers
-        .get("x-topgg-signature")
-        .and_then(|v| v.to_str().ok())
-        .ok_or("missing x-topgg-signature header")?;
-
-    // Parse "t={timestamp},v1={hex}"
-    let mut timestamp = None;
-    let mut signature = None;
-    for part in sig_header.split(',') {
-        if let Some(t) = part.strip_prefix("t=") {
-            timestamp = Some(t);
-        } else if let Some(v) = part.strip_prefix("v1=") {
-            signature = Some(v);
-        }
-    }
-
-    let timestamp = timestamp.ok_or("missing timestamp in signature")?;
-    let signature = signature.ok_or("missing v1 in signature")?;
-
-    // Compute expected HMAC
-    let message = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| format!("hmac init: {e}"))?;
-    mac.update(message.as_bytes());
-
-    let expected = hex::encode(mac.finalize().into_bytes());
-
-    if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
-        return Err("signature mismatch".into());
-    }
-
-    Ok(())
-}
-
-/// Constant-time comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-// ── Plugin Server Endpoints ──────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct RegisterRequest {
-    guild_id: String,
-    role_id: String,
-}
-
-async fn plugin_register(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<RegisterRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Token "))
-        .ok_or_else(|| {
-            warn!("Register request missing Authorization token");
-            StatusCode::UNAUTHORIZED
-        })?;
-
-    {
-        let mut rl = state.rolelogic.write().await;
-        rl.token = token.to_string();
-        rl.guild_id = payload.guild_id.clone();
-        rl.role_id = payload.role_id.clone();
-    }
-
-    info!(
-        "Registered with RoleLogic for guild={} role={}",
-        payload.guild_id, payload.role_id
-    );
-
-    // Trigger initial sync after registration
-    let sync_state = state.clone();
-    tokio::spawn(async move { sync_to_rolelogic(&sync_state).await });
-
-    Ok(Json(serde_json::json!({ "success": true })))
-}
-
-#[derive(Serialize)]
-struct SchemaResponse {
-    version: u32,
-    name: String,
-    description: String,
-    sections: Vec<SchemaSection>,
-    values: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct SchemaSection {
-    title: String,
-    fields: Vec<SchemaField>,
-}
-
-#[derive(Serialize)]
-struct SchemaField {
-    #[serde(rename = "type")]
-    field_type: String,
-    key: String,
-    label: String,
-    description: String,
-    validation: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct PluginConfigRequest {
-    guild_id: String,
-    role_id: String,
-    config: PluginConfigValues,
-}
-
-#[derive(Deserialize)]
-struct PluginConfigValues {
-    vote_ttl_hours: Option<f64>,
-}
-
-async fn plugin_schema(
-    State(state): State<AppState>,
-) -> Json<SchemaResponse> {
-    let runtime = state.runtime.read().await;
-    let vote_ttl_hours = runtime.vote_ttl.as_secs_f64() / 3600.0;
-
-    Json(SchemaResponse {
-        version: 1,
-        name: "VoterRole".to_string(),
-        description: "Assigns a Discord role to users who vote on Top.gg. The role is automatically removed when the vote expires.".to_string(),
-        sections: vec![SchemaSection {
-            title: "Timing".to_string(),
-            fields: vec![
-                SchemaField {
-                    field_type: "number".to_string(),
-                    key: "vote_ttl_hours".to_string(),
-                    label: "Vote Duration (hours)".to_string(),
-                    description: "How long a vote lasts before the role is removed".to_string(),
-                    validation: serde_json::json!({"required": true, "min": 1, "max": 168}),
-                },
-            ],
-        }],
-        values: serde_json::json!({
-            "vote_ttl_hours": vote_ttl_hours,
-        }),
-    })
-}
-
-async fn plugin_config_update(
-    State(state): State<AppState>,
-    Json(payload): Json<PluginConfigRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let rl = state.rolelogic.read().await;
-    if payload.guild_id != rl.guild_id || payload.role_id != rl.role_id {
-        warn!(
-            "Config update for unknown guild/role: {}/{}",
-            payload.guild_id, payload.role_id
-        );
-        return Err(StatusCode::NOT_FOUND);
-    }
-    drop(rl);
-
-    let mut runtime = state.runtime.write().await;
-    if let Some(hours) = payload.config.vote_ttl_hours {
-        runtime.vote_ttl = Duration::from_secs_f64(hours * 3600.0);
-        info!("Updated vote_ttl to {} hours", hours);
-    }
-
-    Ok(Json(serde_json::json!({ "status": "ok" })))
-}
-
-#[derive(Deserialize)]
-struct PluginDeleteRequest {
-    guild_id: String,
-    role_id: String,
-}
-
-async fn plugin_config_delete(
-    State(_state): State<AppState>,
-    Json(payload): Json<PluginDeleteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    info!(
-        "Received config delete notification for guild={} role={}",
-        payload.guild_id, payload.role_id
-    );
-
-    Ok(StatusCode::OK)
-}
-
-// ── Single Member API ────────────────────────────────────────────────────────
-
-async fn add_member(state: &AppState, user_id: &str) {
-    let rl = state.rolelogic.read().await;
-    if !rl.is_registered() {
-        warn!("Cannot add member: not registered with RoleLogic");
-        return;
-    }
-    let url = format!(
-        "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users/{}",
-        rl.guild_id, rl.role_id, user_id
-    );
-    let auth = format!("Token {}", rl.token);
-    drop(rl);
-
-    let res = Client::new()
-        .post(&url)
-        .header("Authorization", auth)
-        .send()
-        .await;
-
-    match res {
-        Ok(resp) if resp.status().is_success() => {
-            info!("RoleLogic add member OK: {user_id}");
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            error!("RoleLogic add member failed ({status}): {text}");
-        }
-        Err(e) => {
-            error!("RoleLogic add member request error: {e}");
-        }
-    }
-}
-
-async fn remove_member(state: &AppState, user_id: &str) {
-    let rl = state.rolelogic.read().await;
-    if !rl.is_registered() {
-        warn!("Cannot remove member: not registered with RoleLogic");
-        return;
-    }
-    let url = format!(
-        "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users/{}",
-        rl.guild_id, rl.role_id, user_id
-    );
-    let auth = format!("Token {}", rl.token);
-    drop(rl);
-
-    let res = Client::new()
-        .delete(&url)
-        .header("Authorization", auth)
-        .send()
-        .await;
-
-    match res {
-        Ok(resp) if resp.status().is_success() => {
-            info!("RoleLogic remove member OK: {user_id}");
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            error!("RoleLogic remove member failed ({status}): {text}");
-        }
-        Err(e) => {
-            error!("RoleLogic remove member request error: {e}");
-        }
-    }
-}
-
-fn schedule_removal(state: &AppState, user_id: String, voted_at: Instant) {
-    let state = state.clone();
-    tokio::spawn(async move {
-        let ttl = state.runtime.read().await.vote_ttl;
-        time::sleep(ttl).await;
-
-        // Check if this vote is still the active one (user hasn't re-voted)
-        let should_remove = {
-            let mut store = state.store.write().await;
-            if let Some(&stored_at) = store.get(&user_id) {
-                if stored_at == voted_at {
-                    store.remove(&user_id);
-                    true
-                } else {
-                    false // User re-voted; the newer timer will handle removal
-                }
-            } else {
-                false // Already removed
-            }
-        };
-
-        if should_remove {
-            info!("TTL expired for user {user_id}, removing from RoleLogic");
-            remove_member(&state, &user_id).await;
-        }
-    });
-}
-
-// ── Top.gg Vote Fetching ─────────────────────────────────────────────────────
-
-async fn fetch_topgg_votes(config: &AppConfig, vote_ttl: Duration) -> Result<Vec<String>, String> {
-    let vote_ttl_secs = vote_ttl.as_secs() as i64;
-    let start_date =
-        (Utc::now() - chrono::TimeDelta::seconds(vote_ttl_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
-    let client = Client::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut cursor: Option<String> = None;
-
-    loop {
-        let mut request = client
-            .get("https://top.gg/api/v1/projects/@me/votes")
-            .header("Authorization", format!("Bearer {}", config.topgg_token))
-            .query(&[("startDate", start_date.as_str())]);
-
-        if let Some(ref c) = cursor {
-            request = request.query(&[("cursor", c.as_str())]);
-        }
-
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| format!("top.gg request error: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("top.gg API error ({status}): {text}"));
-        }
-
-        let page: TopggVotesResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("top.gg parse error: {e}"))?;
-
-        if page.data.is_empty() {
-            break;
-        }
-
-        let mut new_entries = false;
-        for entry in page.data {
-            if seen.insert(entry.platform_id.clone()) {
-                new_entries = true;
-            }
-        }
-
-        if !new_entries {
-            break; // All entries already seen, stop paginating
-        }
-
-        match page.cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
-        }
-    }
-
-    Ok(seen.into_iter().collect())
-}
-
-// ── Background Sync ──────────────────────────────────────────────────────────
-
-async fn sync_loop(state: AppState) {
-    loop {
-        time::sleep(state.config.sync_interval).await;
-        sync_to_rolelogic(&state).await;
-    }
-}
-
-async fn sync_to_rolelogic(state: &AppState) {
-    let rl = state.rolelogic.read().await;
-    if !rl.is_registered() {
-        warn!("Skipping sync: not registered with RoleLogic");
-        return;
-    }
-    let guild_id = rl.guild_id.clone();
-    let role_id = rl.role_id.clone();
-    let auth = format!("Token {}", rl.token);
-    drop(rl);
-
-    // 1. Fetch recent votes from top.gg
-    let vote_ttl = state.runtime.read().await.vote_ttl;
-    let user_ids = match fetch_topgg_votes(&state.config, vote_ttl).await {
-        Ok(ids) => {
-            info!("Fetched {} voter(s) from top.gg", ids.len());
-            ids
-        }
-        Err(e) => {
-            error!("Failed to fetch votes from top.gg: {e}");
-            return;
-        }
-    };
-
-    // 2. Update in-memory store with fetched votes
-    {
-        let mut store = state.store.write().await;
-        store.clear();
-        let now = Instant::now();
-        for id in &user_ids {
-            store.insert(id.clone(), now);
-        }
-    }
-
-    // 3. Sync to RoleLogic
-    info!("Syncing {} voter(s) to RoleLogic", user_ids.len());
-
-    let url = format!(
-        "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users",
-        guild_id, role_id
-    );
-
-    let res = Client::new()
-        .put(&url)
-        .header("Authorization", auth)
-        .json(&user_ids)
-        .send()
-        .await;
-
-    match res {
-        Ok(resp) if resp.status().is_success() => {
-            info!("RoleLogic sync OK");
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            error!("RoleLogic sync failed ({status}): {text}");
-        }
-        Err(e) => {
-            error!("RoleLogic sync request error: {e}");
-        }
-    }
-}
-
-// ── Health ────────────────────────────────────────────────────────────────────
-
-async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let count = state.store.read().await.len();
-    (StatusCode::OK, format!("{{\"voters\":{count}}}"))
-}
-
-// ── Env Helpers ──────────────────────────────────────────────────────────────
+// ── Env Helpers ─────────────────────────────────────────────────────────────
 
 fn required_env(key: &str) -> String {
     env::var(key).unwrap_or_else(|_| panic!("{key} must be set"))

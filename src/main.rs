@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -7,7 +7,7 @@ use axum::{
 };
 use hmac::{Hmac, Mac};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use chrono::{SecondsFormat, Utc};
 use std::{
@@ -28,6 +28,7 @@ type HmacSha256 = Hmac<Sha256>;
 struct AppState {
     store: VoterStore,
     config: AppConfig,
+    runtime: Arc<RwLock<RuntimeConfig>>,
 }
 
 #[derive(Clone)]
@@ -37,8 +38,12 @@ struct AppConfig {
     rolelogic_token: String,
     rolelogic_guild_id: String,
     rolelogic_role_id: String,
-    sync_interval: Duration,
+}
+
+#[derive(Clone)]
+struct RuntimeConfig {
     vote_ttl: Duration,
+    sync_interval: Duration,
 }
 
 // ── Top.gg Webhook Payload ───────────────────────────────────────────────────
@@ -86,13 +91,17 @@ async fn main() {
         rolelogic_token: required_env("ROLELOGIC_TOKEN"),
         rolelogic_guild_id: required_env("ROLELOGIC_GUILD_ID"),
         rolelogic_role_id: required_env("ROLELOGIC_ROLE_ID"),
-        sync_interval: Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 43200)),
-        vote_ttl: Duration::from_secs(env_or("VOTE_TTL_SECS", 86400)),
     };
+
+    let runtime = Arc::new(RwLock::new(RuntimeConfig {
+        vote_ttl: Duration::from_secs(env_or("VOTE_TTL_SECS", 86400)),
+        sync_interval: Duration::from_secs(env_or("SYNC_INTERVAL_SECS", 43200)),
+    }));
 
     let state = AppState {
         store: Arc::new(RwLock::new(HashMap::new())),
         config: config.clone(),
+        runtime,
     };
 
     // Spawn background sync task
@@ -102,6 +111,8 @@ async fn main() {
     let app = Router::new()
         .route("/webhook/topgg", post(topgg_webhook))
         .route("/health", get(health))
+        .route("/schema", get(plugin_schema))
+        .route("/config", post(plugin_config_update).delete(plugin_config_delete))
         .with_state(state);
 
     let host = env_or_str("HOST", "0.0.0.0");
@@ -219,6 +230,154 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
+// ── Plugin Server Endpoints ──────────────────────────────────────────────────
+
+fn verify_rolelogic_token(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let token = auth
+        .strip_prefix("Token ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if token != expected {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SchemaResponse {
+    version: u32,
+    name: String,
+    description: String,
+    sections: Vec<SchemaSection>,
+    values: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct SchemaSection {
+    title: String,
+    fields: Vec<SchemaField>,
+}
+
+#[derive(Serialize)]
+struct SchemaField {
+    #[serde(rename = "type")]
+    field_type: String,
+    key: String,
+    label: String,
+    description: String,
+    validation: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct PluginConfigRequest {
+    guild_id: String,
+    role_id: String,
+    config: PluginConfigValues,
+}
+
+#[derive(Deserialize)]
+struct PluginConfigValues {
+    vote_ttl_hours: Option<f64>,
+    sync_interval_hours: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct PluginDeleteRequest {
+    guild_id: String,
+    role_id: String,
+}
+
+async fn plugin_schema(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SchemaResponse>, StatusCode> {
+    verify_rolelogic_token(&headers, &state.config.rolelogic_token)?;
+
+    let runtime = state.runtime.read().await;
+    let vote_ttl_hours = runtime.vote_ttl.as_secs_f64() / 3600.0;
+    let sync_interval_hours = runtime.sync_interval.as_secs_f64() / 3600.0;
+
+    Ok(Json(SchemaResponse {
+        version: 1,
+        name: "VoterRole".to_string(),
+        description: "Assigns a Discord role to users who vote on Top.gg. The role is automatically removed when the vote expires.".to_string(),
+        sections: vec![SchemaSection {
+            title: "Timing".to_string(),
+            fields: vec![
+                SchemaField {
+                    field_type: "number".to_string(),
+                    key: "vote_ttl_hours".to_string(),
+                    label: "Vote Duration (hours)".to_string(),
+                    description: "How long a vote lasts before the role is removed".to_string(),
+                    validation: serde_json::json!({"required": true, "min": 1, "max": 168}),
+                },
+                SchemaField {
+                    field_type: "number".to_string(),
+                    key: "sync_interval_hours".to_string(),
+                    label: "Sync Interval (hours)".to_string(),
+                    description: "How often to re-sync all voters with RoleLogic".to_string(),
+                    validation: serde_json::json!({"required": true, "min": 1, "max": 168}),
+                },
+            ],
+        }],
+        values: serde_json::json!({
+            "vote_ttl_hours": vote_ttl_hours,
+            "sync_interval_hours": sync_interval_hours,
+        }),
+    }))
+}
+
+async fn plugin_config_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<PluginConfigRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    verify_rolelogic_token(&headers, &state.config.rolelogic_token)?;
+
+    if payload.guild_id != state.config.rolelogic_guild_id
+        || payload.role_id != state.config.rolelogic_role_id
+    {
+        warn!(
+            "Config update for unknown guild/role: {}/{}",
+            payload.guild_id, payload.role_id
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let mut runtime = state.runtime.write().await;
+    if let Some(hours) = payload.config.vote_ttl_hours {
+        runtime.vote_ttl = Duration::from_secs_f64(hours * 3600.0);
+        info!("Updated vote_ttl to {} hours", hours);
+    }
+    if let Some(hours) = payload.config.sync_interval_hours {
+        runtime.sync_interval = Duration::from_secs_f64(hours * 3600.0);
+        info!("Updated sync_interval to {} hours", hours);
+    }
+
+    Ok(Json(serde_json::json!({ "status": "ok" })))
+}
+
+async fn plugin_config_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<PluginDeleteRequest>,
+) -> Result<StatusCode, StatusCode> {
+    verify_rolelogic_token(&headers, &state.config.rolelogic_token)?;
+
+    info!(
+        "Received config delete notification for guild={} role={}",
+        payload.guild_id, payload.role_id
+    );
+
+    Ok(StatusCode::OK)
+}
+
 // ── Single Member API ────────────────────────────────────────────────────────
 
 async fn add_member(state: &AppState, user_id: &str) {
@@ -283,8 +442,8 @@ async fn remove_member(state: &AppState, user_id: &str) {
 
 fn schedule_removal(state: &AppState, user_id: String, voted_at: Instant) {
     let state = state.clone();
-    let ttl = state.config.vote_ttl;
     tokio::spawn(async move {
+        let ttl = state.runtime.read().await.vote_ttl;
         time::sleep(ttl).await;
 
         // Check if this vote is still the active one (user hasn't re-voted)
@@ -311,8 +470,8 @@ fn schedule_removal(state: &AppState, user_id: String, voted_at: Instant) {
 
 // ── Top.gg Vote Fetching ─────────────────────────────────────────────────────
 
-async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
-    let vote_ttl_secs = config.vote_ttl.as_secs() as i64;
+async fn fetch_topgg_votes(config: &AppConfig, vote_ttl: Duration) -> Result<Vec<String>, String> {
+    let vote_ttl_secs = vote_ttl.as_secs() as i64;
     let start_date =
         (Utc::now() - chrono::TimeDelta::seconds(vote_ttl_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let client = Client::new();
@@ -372,16 +531,17 @@ async fn fetch_topgg_votes(config: &AppConfig) -> Result<Vec<String>, String> {
 // ── Background Sync ──────────────────────────────────────────────────────────
 
 async fn sync_loop(state: AppState) {
-    let mut interval = time::interval(state.config.sync_interval);
     loop {
-        interval.tick().await;
+        let interval_duration = state.runtime.read().await.sync_interval;
+        time::sleep(interval_duration).await;
         sync_to_rolelogic(&state).await;
     }
 }
 
 async fn sync_to_rolelogic(state: &AppState) {
     // 1. Fetch recent votes from top.gg
-    let user_ids = match fetch_topgg_votes(&state.config).await {
+    let vote_ttl = state.runtime.read().await.vote_ttl;
+    let user_ids = match fetch_topgg_votes(&state.config, vote_ttl).await {
         Ok(ids) => {
             info!("Fetched {} voter(s) from top.gg", ids.len());
             ids

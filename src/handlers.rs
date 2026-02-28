@@ -1,11 +1,10 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::{
     AppState, crypto, db,
@@ -17,39 +16,33 @@ use crate::{
 
 pub async fn topgg_webhook(
     State(state): State<AppState>,
-    Path(registration_id): Path<Uuid>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    // 1. Look up registration
-    let reg = match db::get_registration(&state.db, registration_id).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            warn!("Webhook for unknown registration {registration_id}");
-            return StatusCode::NOT_FOUND;
-        }
+    // 1. Fetch all registrations that have a topgg_secret
+    let registrations = match db::get_registrations_with_secret(&state.db).await {
+        Ok(r) => r,
         Err(e) => {
-            error!("DB error looking up registration: {e}");
+            error!("DB error fetching registrations: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
 
-    // 2. Check credentials exist
-    let topgg_secret = match &reg.topgg_secret {
-        Some(s) => s,
-        None => {
-            warn!("Webhook received but no topgg_secret configured for reg {registration_id}");
-            return StatusCode::SERVICE_UNAVAILABLE;
-        }
-    };
+    // 2. Find registrations whose secret matches the HMAC signature
+    let matched: Vec<_> = registrations
+        .into_iter()
+        .filter(|reg| {
+            let secret = reg.topgg_secret.as_deref().unwrap_or_default();
+            crypto::verify_signature(&headers, &body, secret).is_ok()
+        })
+        .collect();
 
-    // 3. Verify HMAC signature
-    if let Err(e) = crypto::verify_signature(&headers, &body, topgg_secret) {
-        warn!("Webhook signature verification failed for reg {registration_id}: {e}");
+    if matched.is_empty() {
+        warn!("Webhook signature did not match any registration");
         return StatusCode::UNAUTHORIZED;
     }
 
-    // 4. Parse payload
+    // 3. Parse payload
     let payload: WebhookPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -58,7 +51,7 @@ pub async fn topgg_webhook(
         }
     };
 
-    // 5. Handle event type
+    // 4. Handle event type
     match payload.event_type.as_str() {
         "vote.create" => {
             let data = match payload.data {
@@ -67,24 +60,28 @@ pub async fn topgg_webhook(
             };
 
             let user_id = data.user.platform_id;
-            info!("Vote received from user {user_id} for reg {registration_id}");
 
-            // Store in DB
-            if let Err(e) = db::upsert_voter(&state.db, reg.id, &user_id).await {
-                error!("Failed to store voter: {e}");
-                return StatusCode::INTERNAL_SERVER_ERROR;
+            for reg in &matched {
+                info!("Vote received from user {user_id} for reg {}", reg.id);
+
+                if let Err(e) = db::upsert_voter(&state.db, reg.id, &user_id).await {
+                    error!("Failed to store voter for reg {}: {e}", reg.id);
+                    continue;
+                }
+
+                let s = state.clone();
+                let uid = user_id.clone();
+                let r = reg.clone();
+                tokio::spawn(async move { add_member(&s, &r, &uid).await });
             }
-
-            // Add member to RoleLogic
-            let s = state.clone();
-            let uid = user_id.clone();
-            let r = reg.clone();
-            tokio::spawn(async move { add_member(&s, &r, &uid).await });
 
             StatusCode::OK
         }
         "webhook.test" => {
-            info!("Test webhook received for reg {registration_id}");
+            info!(
+                "Test webhook received, matched {} registration(s)",
+                matched.len()
+            );
             StatusCode::OK
         }
         other => {
@@ -132,7 +129,7 @@ pub async fn plugin_register(
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "webhook_path": format!("/webhook/topgg/{}", registration_id),
+        "webhook_path": "/webhook/topgg",
         "registration_id": registration_id
     })))
 }
@@ -150,7 +147,6 @@ pub async fn plugin_schema(
     let mut vote_ttl_hours = 24.0;
     let mut topgg_secret = String::new();
     let mut topgg_token = String::new();
-    let mut webhook_path = String::new();
 
     if let Some(token) = token {
         if let Ok(registrations) = db::get_all_registrations(&state.db).await {
@@ -158,7 +154,6 @@ pub async fn plugin_schema(
                 vote_ttl_hours = reg.vote_ttl_secs as f64 / 3600.0;
                 topgg_secret = reg.topgg_secret.clone().unwrap_or_default();
                 topgg_token = reg.topgg_token.clone().unwrap_or_default();
-                webhook_path = format!("/webhook/topgg/{}", reg.id);
             }
         }
     }
@@ -178,12 +173,11 @@ pub async fn plugin_schema(
                     validation: None,
                     value: Some(format!(
                         "1. Go to your bot's Top.gg dashboard and find the Webhooks section.\n\
-                         2. Set the webhook URL to: {}{}\n\
+                         2. Set the webhook URL to: {}/webhook/topgg\n\
                          3. Copy the Webhook Secret from Top.gg and paste it below.\n\
                          4. Go to the API section on Top.gg and generate an API Token, then paste it below.\n\
                          5. Click Save to activate vote tracking.",
                         state.public_url,
-                        if webhook_path.is_empty() { "/webhook/topgg/<registration_id>".to_string() } else { webhook_path }
                     )),
                 }],
             },

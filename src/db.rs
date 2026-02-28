@@ -3,14 +3,6 @@ use uuid::Uuid;
 
 use crate::models::Registration;
 
-pub async fn get_registration(pool: &PgPool, id: Uuid) -> Result<Option<Registration>, sqlx::Error> {
-    sqlx::query_as::<_, Registration>("SELECT * FROM registrations WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-}
-
-#[allow(dead_code)]
 pub async fn get_registration_by_guild_role(
     pool: &PgPool,
     guild_id: &str,
@@ -93,6 +85,12 @@ pub async fn delete_registration(
 
 pub async fn get_all_registrations(pool: &PgPool) -> Result<Vec<Registration>, sqlx::Error> {
     sqlx::query_as::<_, Registration>("SELECT * FROM registrations")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn get_registrations_with_secret(pool: &PgPool) -> Result<Vec<Registration>, sqlx::Error> {
+    sqlx::query_as::<_, Registration>("SELECT * FROM registrations WHERE topgg_secret IS NOT NULL")
         .fetch_all(pool)
         .await
 }

@@ -61,7 +61,7 @@ async fn main() {
     tokio::spawn(async move { sync::ttl_cleanup_loop(cleanup_state).await });
 
     let app = Router::new()
-        .route("/webhook/topgg/{registration_id}", post(handlers::topgg_webhook))
+        .route("/webhook/topgg", post(handlers::topgg_webhook))
         .route("/health", get(handlers::health))
         .route("/register", post(handlers::plugin_register))
         .route("/schema", get(handlers::plugin_schema))

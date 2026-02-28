@@ -138,25 +138,21 @@ pub async fn plugin_schema(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SchemaResponse>, StatusCode> {
-    // Token is optional - use it to look up current values if present
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Token "));
+    let token = extract_auth_token(&headers)?;
 
-    let mut vote_ttl_hours = 24.0;
-    let mut topgg_secret = String::new();
-    let mut topgg_token = String::new();
+    let registrations = db::get_all_registrations(&state.db).await.map_err(|e| {
+        error!("DB error fetching registrations: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    if let Some(token) = token {
-        if let Ok(registrations) = db::get_all_registrations(&state.db).await {
-            if let Some(reg) = registrations.iter().find(|r| r.rolelogic_token == token) {
-                vote_ttl_hours = reg.vote_ttl_secs as f64 / 3600.0;
-                topgg_secret = reg.topgg_secret.clone().unwrap_or_default();
-                topgg_token = reg.topgg_token.clone().unwrap_or_default();
-            }
-        }
-    }
+    let reg = registrations
+        .iter()
+        .find(|r| r.rolelogic_token == token)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let vote_ttl_hours = reg.vote_ttl_secs as f64 / 3600.0;
+    let topgg_secret = reg.topgg_secret.clone().unwrap_or_default();
+    let topgg_token = reg.topgg_token.clone().unwrap_or_default();
 
     Ok(Json(SchemaResponse {
         version: 1,

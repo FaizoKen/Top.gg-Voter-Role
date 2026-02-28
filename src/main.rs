@@ -111,6 +111,7 @@ async fn main() {
     let app = Router::new()
         .route("/webhook/topgg", post(topgg_webhook))
         .route("/health", get(health))
+        .route("/register", post(plugin_register))
         .route("/schema", get(plugin_schema))
         .route("/config", post(plugin_config_update).delete(plugin_config_delete))
         .with_state(state);
@@ -250,6 +251,27 @@ async fn save_rolelogic_token(state: &AppState, headers: &HeaderMap) {
     }
 }
 
+#[derive(Deserialize)]
+struct RegisterRequest {
+    guild_id: String,
+    role_id: String,
+}
+
+async fn plugin_register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RegisterRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    save_rolelogic_token(&state, &headers).await;
+
+    info!(
+        "Registered with RoleLogic for guild={} role={}",
+        payload.guild_id, payload.role_id
+    );
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 #[derive(Serialize)]
 struct SchemaResponse {
     version: u32,
@@ -291,9 +313,7 @@ struct PluginConfigValues {
 
 async fn plugin_schema(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Json<SchemaResponse> {
-    save_rolelogic_token(&state, &headers).await;
     let runtime = state.runtime.read().await;
     let vote_ttl_hours = runtime.vote_ttl.as_secs_f64() / 3600.0;
     let sync_interval_hours = runtime.sync_interval.as_secs_f64() / 3600.0;
@@ -330,10 +350,8 @@ async fn plugin_schema(
 
 async fn plugin_config_update(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(payload): Json<PluginConfigRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    save_rolelogic_token(&state, &headers).await;
 
     if payload.guild_id != state.config.rolelogic_guild_id
         || payload.role_id != state.config.rolelogic_role_id

@@ -154,11 +154,26 @@ pub async fn plugin_config(
     let topgg_secret = reg.topgg_secret.clone().unwrap_or_default();
     let topgg_token = reg.topgg_token.clone().unwrap_or_default();
 
+    let webhook_url = format!("{}/webhook/topgg", state.public_url);
+
     Ok(Json(ConfigResponse {
         version: 1,
         name: "VoterRole".to_string(),
         description: "Assigns a Discord role to users who vote on Top.gg. The role is automatically removed when the vote expires.".to_string(),
         sections: vec![
+            ConfigSection {
+                title: "Webhook URL".to_string(),
+                description: Some("Copy this URL and paste it into your Top.gg Webhooks settings.".to_string()),
+                fields: vec![ConfigField {
+                    field_type: "display".to_string(),
+                    key: "webhook_url".to_string(),
+                    label: "Your Webhook URL".to_string(),
+                    description: String::new(),
+                    placeholder: None,
+                    validation: None,
+                    value: Some(webhook_url),
+                }],
+            },
             ConfigSection {
                 title: "Setup Guide".to_string(),
                 description: None,
@@ -169,26 +184,26 @@ pub async fn plugin_config(
                     description: String::new(),
                     placeholder: None,
                     validation: None,
-                    value: Some(format!(
-                        "1. Go to your bot's Top.gg dashboard and find the Webhooks section.\n\
-                         2. Set the webhook URL to: {}/webhook/topgg\n\
+                    value: Some(
+                        "1. Go to your Top.gg dashboard and find the Webhooks section.\n\
+                         2. Paste the Webhook URL shown above into the webhook URL field on Top.gg.\n\
                          3. Copy the Webhook Secret from Top.gg and paste it below.\n\
                          4. Go to the API section on Top.gg and generate an API Token, then paste it below.\n\
-                         5. Click Save to activate vote tracking.",
-                        state.public_url,
-                    )),
+                         5. Click Save to activate vote tracking."
+                            .to_string(),
+                    ),
                 }],
             },
             ConfigSection {
                 title: "Top.gg Credentials".to_string(),
-                description: None,
+                description: Some("Enter the credentials from your Top.gg dashboard.".to_string()),
                 fields: vec![
                     ConfigField {
                         field_type: "text".to_string(),
                         key: "topgg_secret".to_string(),
                         label: "Webhook Secret".to_string(),
-                        description: "Found in your Top.gg bot dashboard under Webhooks".to_string(),
-                        placeholder: None,
+                        description: "Found in your Top.gg dashboard under Webhooks.".to_string(),
+                        placeholder: Some("Paste your Top.gg webhook secret here".to_string()),
                         validation: Some(serde_json::json!({"required": true})),
                         value: None,
                     },
@@ -196,8 +211,8 @@ pub async fn plugin_config(
                         field_type: "text".to_string(),
                         key: "topgg_token".to_string(),
                         label: "API Token".to_string(),
-                        description: "Found in your Top.gg bot dashboard under API".to_string(),
-                        placeholder: None,
+                        description: "Found in your Top.gg dashboard under API.".to_string(),
+                        placeholder: Some("Paste your Top.gg API token here".to_string()),
                         validation: Some(serde_json::json!({"required": true})),
                         value: None,
                     },
@@ -210,8 +225,8 @@ pub async fn plugin_config(
                     field_type: "number".to_string(),
                     key: "vote_ttl_hours".to_string(),
                     label: "Vote Duration (hours)".to_string(),
-                    description: "How long a user keeps the role after voting (1-168 hours)".to_string(),
-                    placeholder: None,
+                    description: "How long a user keeps the role after voting. Minimum 1 hour, maximum 168 hours (7 days).".to_string(),
+                    placeholder: Some("12".to_string()),
                     validation: Some(serde_json::json!({"required": true, "min": 1, "max": 168})),
                     value: None,
                 }],

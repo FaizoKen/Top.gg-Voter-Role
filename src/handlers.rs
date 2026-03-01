@@ -134,10 +134,10 @@ pub async fn plugin_register(
     })))
 }
 
-pub async fn plugin_schema(
+pub async fn plugin_config(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<SchemaResponse>, StatusCode> {
+) -> Result<Json<ConfigResponse>, StatusCode> {
     let token = extract_auth_token(&headers)?;
 
     let registrations = db::get_all_registrations(&state.db).await.map_err(|e| {
@@ -154,18 +154,20 @@ pub async fn plugin_schema(
     let topgg_secret = reg.topgg_secret.clone().unwrap_or_default();
     let topgg_token = reg.topgg_token.clone().unwrap_or_default();
 
-    Ok(Json(SchemaResponse {
+    Ok(Json(ConfigResponse {
         version: 1,
         name: "VoterRole".to_string(),
         description: "Assigns a Discord role to users who vote on Top.gg. The role is automatically removed when the vote expires.".to_string(),
         sections: vec![
-            SchemaSection {
+            ConfigSection {
                 title: "Setup Guide".to_string(),
-                fields: vec![SchemaField {
+                description: None,
+                fields: vec![ConfigField {
                     field_type: "display".to_string(),
                     key: "guide".to_string(),
                     label: "How to connect Top.gg".to_string(),
                     description: String::new(),
+                    placeholder: None,
                     validation: None,
                     value: Some(format!(
                         "1. Go to your bot's Top.gg dashboard and find the Webhooks section.\n\
@@ -177,34 +179,39 @@ pub async fn plugin_schema(
                     )),
                 }],
             },
-            SchemaSection {
+            ConfigSection {
                 title: "Top.gg Credentials".to_string(),
+                description: None,
                 fields: vec![
-                    SchemaField {
+                    ConfigField {
                         field_type: "text".to_string(),
                         key: "topgg_secret".to_string(),
                         label: "Webhook Secret".to_string(),
                         description: "Found in your Top.gg bot dashboard under Webhooks".to_string(),
+                        placeholder: None,
                         validation: Some(serde_json::json!({"required": true})),
                         value: None,
                     },
-                    SchemaField {
+                    ConfigField {
                         field_type: "text".to_string(),
                         key: "topgg_token".to_string(),
                         label: "API Token".to_string(),
                         description: "Found in your Top.gg bot dashboard under API".to_string(),
+                        placeholder: None,
                         validation: Some(serde_json::json!({"required": true})),
                         value: None,
                     },
                 ],
             },
-            SchemaSection {
+            ConfigSection {
                 title: "Timing".to_string(),
-                fields: vec![SchemaField {
+                description: None,
+                fields: vec![ConfigField {
                     field_type: "number".to_string(),
                     key: "vote_ttl_hours".to_string(),
                     label: "Vote Duration (hours)".to_string(),
                     description: "How long a user keeps the role after voting (1-168 hours)".to_string(),
+                    placeholder: None,
                     validation: Some(serde_json::json!({"required": true, "min": 1, "max": 168})),
                     value: None,
                 }],

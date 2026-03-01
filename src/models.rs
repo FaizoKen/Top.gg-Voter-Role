@@ -66,27 +66,31 @@ pub struct RegisterRequest {
 }
 
 #[derive(Serialize)]
-pub struct SchemaResponse {
+pub struct ConfigResponse {
     pub version: u32,
     pub name: String,
     pub description: String,
-    pub sections: Vec<SchemaSection>,
+    pub sections: Vec<ConfigSection>,
     pub values: serde_json::Value,
 }
 
 #[derive(Serialize)]
-pub struct SchemaSection {
+pub struct ConfigSection {
     pub title: String,
-    pub fields: Vec<SchemaField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub fields: Vec<ConfigField>,
 }
 
 #[derive(Serialize)]
-pub struct SchemaField {
+pub struct ConfigField {
     #[serde(rename = "type")]
     pub field_type: String,
     pub key: String,
     pub label: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

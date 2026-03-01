@@ -64,10 +64,11 @@ async fn main() {
         .route("/webhook/topgg", post(handlers::topgg_webhook))
         .route("/health", get(handlers::health))
         .route("/register", post(handlers::plugin_register))
-        .route("/schema", get(handlers::plugin_schema))
         .route(
             "/config",
-            post(handlers::plugin_config_update).delete(handlers::plugin_config_delete),
+            get(handlers::plugin_config)
+                .post(handlers::plugin_config_update)
+                .delete(handlers::plugin_config_delete),
         )
         .with_state(state);
 

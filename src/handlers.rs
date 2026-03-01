@@ -158,7 +158,7 @@ pub async fn plugin_config(
 
     Ok(Json(ConfigResponse {
         version: 1,
-        name: "VoterRole".to_string(),
+        name: "Top.gg Voter Role".to_string(),
         description: "Assigns a Discord role to users who vote on Top.gg. The role is automatically removed when the vote expires.".to_string(),
         sections: vec![
             ConfigSection {

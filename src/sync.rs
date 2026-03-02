@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{SecondsFormat, Utc};
 use tracing::{error, info};
 
-use crate::{AppState, db, handlers, models::*};
+use crate::{AppState, db, models::*};
 
 // ── Background Loops ────────────────────────────────────────────────────────
 
@@ -31,30 +31,56 @@ pub async fn ttl_cleanup_loop(state: AppState) {
     loop {
         interval.tick().await;
 
-        let registrations = match db::get_all_registrations(&state.db).await {
-            Ok(r) => r,
+        let expired = match db::delete_all_expired_voters(&state.db).await {
+            Ok(rows) => rows,
             Err(e) => {
-                error!("Failed to load registrations for TTL cleanup: {e}");
+                error!("Failed to delete expired voters: {e}");
                 continue;
             }
         };
 
-        for reg in &registrations {
-            let expired = match db::delete_expired_voters(&state.db, reg.id, reg.vote_ttl_secs).await {
-                Ok(ids) => ids,
-                Err(e) => {
-                    error!("Failed to delete expired voters for reg {}: {e}", reg.id);
-                    continue;
-                }
-            };
+        if expired.is_empty() {
+            continue;
+        }
 
-            if !expired.is_empty() {
-                info!("Removed {} expired voter(s) for reg {}", expired.len(), reg.id);
-            }
+        info!("Removed {} expired voter(s)", expired.len());
 
-            for user_id in &expired {
-                handlers::remove_member(&state, reg, user_id).await;
-            }
+        // Fire all remove_member calls concurrently
+        let futures: Vec<_> = expired
+            .iter()
+            .map(|(_, guild_id, role_id, token, user_id)| {
+                remove_member_raw(&state.http, guild_id, role_id, token, user_id)
+            })
+            .collect();
+
+        futures::future::join_all(futures).await;
+    }
+}
+
+/// Lightweight remove_member that takes raw fields instead of a full Registration.
+async fn remove_member_raw(
+    http: &reqwest::Client,
+    guild_id: &str,
+    role_id: &str,
+    token: &str,
+    user_id: &str,
+) {
+    let url = format!(
+        "https://api-rolelogic.faizo.net/api/role-link/{guild_id}/{role_id}/users/{user_id}"
+    );
+    let auth = format!("Token {token}");
+
+    match http.delete(&url).header("Authorization", auth).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            info!("RoleLogic remove member OK: {user_id}");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            error!("RoleLogic remove member failed ({status}): {text}");
+        }
+        Err(e) => {
+            error!("RoleLogic remove member request error: {e}");
         }
     }
 }
@@ -63,7 +89,7 @@ pub async fn ttl_cleanup_loop(state: AppState) {
 
 pub async fn sync_single_registration(state: &AppState, reg: &Registration) {
     let topgg_token = match &reg.topgg_token {
-        Some(t) => t.clone(),
+        Some(t) => t,
         None => {
             info!("Skipping sync for reg {}: no Top.gg token configured", reg.id);
             return;
@@ -73,7 +99,7 @@ pub async fn sync_single_registration(state: &AppState, reg: &Registration) {
     let vote_ttl = Duration::from_secs(reg.vote_ttl_secs as u64);
 
     // 1. Fetch votes from Top.gg
-    let user_ids = match fetch_topgg_votes(state, &topgg_token, vote_ttl).await {
+    let user_ids = match fetch_topgg_votes(state, topgg_token, vote_ttl).await {
         Ok(ids) => {
             info!("Fetched {} voter(s) from Top.gg for reg {}", ids.len(), reg.id);
             ids
@@ -169,7 +195,7 @@ async fn fetch_topgg_votes(
 
         let mut new_entries = false;
         for entry in page.data {
-            if seen.insert(entry.platform_id.clone()) {
+            if seen.insert(entry.platform_id) {
                 new_entries = true;
             }
         }

@@ -23,10 +23,11 @@ pub fn verify_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> Resul
     let timestamp = timestamp.ok_or("missing timestamp in signature")?;
     let signature = signature.ok_or("missing v1 in signature")?;
 
-    let message = format!("{timestamp}.{}", String::from_utf8_lossy(body));
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| format!("hmac init: {e}"))?;
-    mac.update(message.as_bytes());
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
 
     let expected = hex::encode(mac.finalize().into_bytes());
 

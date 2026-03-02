@@ -89,6 +89,24 @@ pub async fn get_all_registrations(pool: &PgPool) -> Result<Vec<Registration>, s
         .await
 }
 
+pub async fn get_registration_by_token(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<Registration>, sqlx::Error> {
+    sqlx::query_as::<_, Registration>(
+        "SELECT * FROM registrations WHERE rolelogic_token = $1",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn count_registrations(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM registrations")
+        .fetch_one(pool)
+        .await
+}
+
 pub async fn get_registrations_with_secret(pool: &PgPool) -> Result<Vec<Registration>, sqlx::Error> {
     sqlx::query_as::<_, Registration>("SELECT * FROM registrations WHERE topgg_secret IS NOT NULL")
         .fetch_all(pool)
@@ -112,31 +130,20 @@ pub async fn upsert_voter(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub async fn get_active_voters(
+/// Batch-delete all expired voters across all registrations in a single query.
+/// Returns (registration_id, user_id) pairs for the deleted rows.
+pub async fn delete_all_expired_voters(
     pool: &PgPool,
-    registration_id: Uuid,
-    vote_ttl_secs: i32,
-) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT user_id FROM voters WHERE registration_id = $1 AND voted_at > now() - make_interval(secs => $2::double precision)",
+) -> Result<Vec<(Uuid, String, String, String, String)>, sqlx::Error> {
+    // Join with registrations to get TTL per registration, and return
+    // the info needed to call remove_member (guild_id, role_id, rolelogic_token, user_id)
+    sqlx::query_as::<_, (Uuid, String, String, String, String)>(
+        r#"DELETE FROM voters v
+           USING registrations r
+           WHERE v.registration_id = r.id
+             AND v.voted_at <= now() - make_interval(secs => r.vote_ttl_secs::double precision)
+           RETURNING r.id, r.guild_id, r.role_id, r.rolelogic_token, v.user_id"#,
     )
-    .bind(registration_id)
-    .bind(vote_ttl_secs as f64)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn delete_expired_voters(
-    pool: &PgPool,
-    registration_id: Uuid,
-    vote_ttl_secs: i32,
-) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar::<_, String>(
-        "DELETE FROM voters WHERE registration_id = $1 AND voted_at <= now() - make_interval(secs => $2::double precision) RETURNING user_id",
-    )
-    .bind(registration_id)
-    .bind(vote_ttl_secs as f64)
     .fetch_all(pool)
     .await
 }
@@ -153,12 +160,13 @@ pub async fn replace_voters(
         .execute(&mut *tx)
         .await?;
 
-    for uid in user_ids {
+    if !user_ids.is_empty() {
         sqlx::query(
-            "INSERT INTO voters (registration_id, user_id, voted_at) VALUES ($1, $2, now())",
+            "INSERT INTO voters (registration_id, user_id, voted_at)
+             SELECT $1, unnest($2::text[]), now()",
         )
         .bind(registration_id)
-        .bind(uid)
+        .bind(user_ids)
         .execute(&mut *tx)
         .await?;
     }

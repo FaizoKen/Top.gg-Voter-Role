@@ -140,14 +140,12 @@ pub async fn plugin_config(
 ) -> Result<Json<ConfigResponse>, StatusCode> {
     let token = extract_auth_token(&headers)?;
 
-    let registrations = db::get_all_registrations(&state.db).await.map_err(|e| {
-        error!("DB error fetching registrations: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let reg = registrations
-        .iter()
-        .find(|r| r.rolelogic_token == token)
+    let reg = db::get_registration_by_token(&state.db, token)
+        .await
+        .map_err(|e| {
+            error!("DB error fetching registration: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let vote_ttl_hours = reg.vote_ttl_secs as f64 / 3600.0;
@@ -345,9 +343,8 @@ pub async fn plugin_config_delete(
 // ── Health ───────────────────────────────────────────────────────────────────
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let count = db::get_all_registrations(&state.db)
+    let count = db::count_registrations(&state.db)
         .await
-        .map(|r| r.len())
         .unwrap_or(0);
 
     (StatusCode::OK, format!("{{\"registrations\":{count}}}"))
@@ -379,6 +376,7 @@ pub async fn add_member(state: &AppState, reg: &Registration, user_id: &str) {
     }
 }
 
+#[allow(dead_code)]
 pub async fn remove_member(state: &AppState, reg: &Registration, user_id: &str) {
     let url = format!(
         "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users/{}",

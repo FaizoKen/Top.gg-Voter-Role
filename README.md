@@ -1,12 +1,14 @@
 # VoterRole
 
-Lightweight Rust backend that receives [Top.gg](https://top.gg) vote webhooks and syncs voter Discord user IDs to [RoleLogic](https://rolelogic.faizo.net) for automatic role assignment.
+Lightweight Rust backend that receives [Top.gg](https://top.gg) vote webhooks and syncs voter Discord user IDs to [RoleLogic](https://rolelogic.faizo.net) for automatic role assignment. Designed as a RoleLogic plugin with multi-guild support.
 
 ## How it works
 
-1. **Receives** Top.gg V2 webhook events with HMAC-SHA256 signature verification
-2. **Stores** voter user IDs in memory for a configurable TTL (default 24h)
-3. **Syncs** the active voter list to RoleLogic's Role Link API on a configurable interval
+1. **Registers** guild/role pairs via the RoleLogic plugin API
+2. **Receives** Top.gg webhook events with HMAC-SHA256 signature verification
+3. **Stores** voter records in PostgreSQL with a configurable per-registration TTL
+4. **Syncs** the active voter list to RoleLogic's Role Link API on a configurable interval
+5. **Cleans up** expired voters every 60 seconds and removes their roles automatically
 
 RoleLogic then automatically assigns/removes Discord roles based on the synced list.
 
@@ -19,22 +21,19 @@ cp .env.example .env
 
 ### Environment Variables
 
-| Variable               | Required | Default   | Description                           |
-| ---------------------- | -------- | --------- | ------------------------------------- |
-| `HOST`                 | No       | `0.0.0.0` | Bind address                          |
-| `PORT`                 | No       | `3000`    | Bind port                             |
-| `TOPGG_WEBHOOK_SECRET` | Yes      | —         | Top.gg webhook secret (`whs_...`)     |
-| `ROLELOGIC_GUILD_ID`   | Yes      | —         | Discord server ID                     |
-| `ROLELOGIC_ROLE_ID`    | Yes      | —         | Discord role ID to assign to voters   |
-| `SYNC_INTERVAL_SECS`   | No       | `43200`   | Sync frequency to RoleLogic (seconds) |
-| `VOTE_TTL_SECS`        | No       | `86400`   | How long votes stay valid (seconds)   |
+| Variable             | Required | Default               | Description                                |
+| -------------------- | -------- | --------------------- | ------------------------------------------ |
+| `DATABASE_URL`       | Yes      | —                     | PostgreSQL connection string               |
+| `HOST`               | No       | `0.0.0.0`             | Bind address                               |
+| `PORT`               | No       | `3000`                | Bind port                                  |
+| `PUBLIC_URL`         | No       | `https://example.com` | Public URL shown in plugin config          |
+| `SYNC_INTERVAL_SECS` | No       | `43200`               | Full sync frequency to RoleLogic (seconds) |
 
 ## Run
 
 ### Docker (recommended)
 
 ```bash
-docker build -t voter-role .
 docker compose up -d
 ```
 
@@ -42,23 +41,32 @@ docker compose up -d
 
 ```bash
 cargo run              # development
-cargo build --release  # production (~3MB binary)
+cargo build --release  # production
 ```
 
 ## Endpoints
 
-| Method | Path             | Description             |
-| ------ | ---------------- | ----------------------- |
-| `POST` | `/webhook/topgg` | Top.gg webhook receiver |
-| `GET`  | `/health`        | Returns `{"voters": N}` |
+| Method   | Path             | Description                    |
+| -------- | ---------------- | ------------------------------ |
+| `POST`   | `/webhook/topgg` | Top.gg webhook receiver        |
+| `GET`    | `/health`        | Returns `{"registrations": N}` |
+| `POST`   | `/register`      | Register a guild/role pair     |
+| `GET`    | `/config`        | Get plugin configuration       |
+| `POST`   | `/config`        | Update plugin configuration    |
+| `DELETE` | `/config`        | Delete a registration          |
 
 ## Top.gg Configuration
 
-In your Top.gg dashboard, set the webhook URL to:
+1. Register your guild/role via the `/register` endpoint (handled by RoleLogic)
+2. In your Top.gg dashboard, set the webhook URL shown in the plugin config
+3. Copy the webhook secret and API token into the plugin config
+4. Votes are tracked automatically with configurable TTL (1–168 hours)
 
-```
-https://your-domain.com/webhook/topgg
-```
+## API Reference
+
+- [RoleLogic Role Link API](https://docs-rolelogic.faizo.net/reference/role-link-api)
+- [Top.gg API v1 — Introduction](https://docs.top.gg/docs/API/v1/@introduction)
+- [Top.gg API v1 — Webhooks](https://docs.top.gg/docs/API/v1/webhooks)
 
 ## License
 

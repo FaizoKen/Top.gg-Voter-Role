@@ -66,7 +66,7 @@ cargo build --release  # production
 ## API Reference
 
 - [RoleLogic Role Link API](https://docs-rolelogic.faizo.net/reference/role-link-api)
-- [Top.gg API v1 — Introduction](https://docs.top.gg/docs/API/v1/@introduction)
+- [Top.gg API v1 — Projects](https://docs.top.gg/docs/API/v1/projects)
 - [Top.gg API v1 — Webhooks](https://docs.top.gg/docs/API/v1/webhooks)
 
 ## License

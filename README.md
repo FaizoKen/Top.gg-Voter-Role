@@ -55,12 +55,13 @@ cargo build --release  # production
 | `POST`   | `/config`        | Update plugin configuration    |
 | `DELETE` | `/config`        | Delete a registration          |
 
-## Top.gg Configuration
+## Usage
 
-1. Register your guild/role via the `/register` endpoint (handled by RoleLogic)
-2. In your Top.gg dashboard, set the webhook URL shown in the plugin config
-3. Copy the webhook secret and API token into the plugin config
-4. Votes are tracked automatically with configurable TTL (1–168 hours)
+1. In the RoleLogic dashboard, create a Role Link and set the **Custom Plugin URL** to your VoterRole instance's public URL
+2. RoleLogic will automatically register the guild/role pair with VoterRole
+3. Open the plugin config in RoleLogic — it will show your webhook URL and credential fields
+4. In your Top.gg dashboard, paste the webhook URL and copy your webhook secret + API token back into the plugin config
+5. Votes are tracked automatically with configurable TTL (1–168 hours)
 
 ## API Reference
 

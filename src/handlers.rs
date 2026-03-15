@@ -197,7 +197,7 @@ pub async fn plugin_config(
                 description: Some("Enter the credentials from your Top.gg dashboard.".to_string()),
                 fields: vec![
                     ConfigField {
-                        field_type: "text".to_string(),
+                        field_type: "secret".to_string(),
                         key: "topgg_secret".to_string(),
                         label: "Webhook Secret".to_string(),
                         description: "Found in your Top.gg dashboard under Webhooks.".to_string(),
@@ -206,7 +206,7 @@ pub async fn plugin_config(
                         value: None,
                     },
                     ConfigField {
-                        field_type: "text".to_string(),
+                        field_type: "secret".to_string(),
                         key: "topgg_token".to_string(),
                         label: "API Token".to_string(),
                         description: "Found in your Top.gg dashboard under API.".to_string(),

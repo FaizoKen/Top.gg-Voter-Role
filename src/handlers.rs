@@ -342,12 +342,29 @@ pub async fn plugin_config_delete(
 
 // ── Health ───────────────────────────────────────────────────────────────────
 
-pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let count = db::count_registrations(&state.db)
-        .await
-        .unwrap_or(0);
+pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let start = std::time::Instant::now();
+    let count = db::count_registrations(&state.db).await;
+    let db_latency = start.elapsed().as_millis() as u64;
 
-    (StatusCode::OK, format!("{{\"registrations\":{count}}}"))
+    let (db_ok, registrations) = match count {
+        Ok(c) => (true, c),
+        Err(_) => (false, 0),
+    };
+
+    let status = if db_ok { "healthy" } else { "degraded" };
+
+    Json(serde_json::json!({
+        "status": status,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "checks": {
+            "database": {
+                "status": status,
+                "latency_ms": db_latency
+            }
+        },
+        "registrations": registrations,
+    }))
 }
 
 // ── RoleLogic Member API ────────────────────────────────────────────────────

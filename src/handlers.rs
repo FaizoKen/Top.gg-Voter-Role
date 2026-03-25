@@ -344,20 +344,17 @@ pub async fn plugin_config_delete(
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let start = std::time::Instant::now();
-    let count = db::count_users(&state.db).await;
+    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
     let db_latency = start.elapsed().as_millis() as u64;
-
-    let (db_ok, total_users) = match count {
-        Ok(c) => (true, c),
-        Err(_) => (false, 0),
-    };
 
     let status = if db_ok { "healthy" } else { "degraded" };
 
     Json(serde_json::json!({
         "status": status,
         "timestamp": chrono::Utc::now().to_rfc3339(),
-        "total_users": total_users,
         "checks": {
             "database": {
                 "status": if db_ok { "up" } else { "down" },

@@ -101,12 +101,6 @@ pub async fn get_registration_by_token(
     .await
 }
 
-pub async fn count_users(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(DISTINCT user_id) FROM voters")
-        .fetch_one(pool)
-        .await
-}
-
 pub async fn get_registrations_with_secret(pool: &PgPool) -> Result<Vec<Registration>, sqlx::Error> {
     sqlx::query_as::<_, Registration>("SELECT * FROM registrations WHERE topgg_secret IS NOT NULL")
         .fetch_all(pool)

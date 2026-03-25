@@ -101,8 +101,8 @@ pub async fn get_registration_by_token(
     .await
 }
 
-pub async fn count_registrations(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM registrations")
+pub async fn count_users(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(DISTINCT user_id) FROM voters")
         .fetch_one(pool)
         .await
 }

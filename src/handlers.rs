@@ -344,7 +344,7 @@ pub async fn plugin_config_delete(
 
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let start = std::time::Instant::now();
-    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+    let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.db)
         .await
         .is_ok();

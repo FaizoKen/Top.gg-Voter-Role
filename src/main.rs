@@ -63,14 +63,16 @@ async fn main() {
     tokio::spawn(async move { sync::ttl_cleanup_loop(cleanup_state).await });
 
     let app = Router::new()
-        .route("/webhook/topgg", post(handlers::topgg_webhook))
-        .route("/health", get(handlers::health))
-        .route("/register", post(handlers::plugin_register))
-        .route(
-            "/config",
-            get(handlers::plugin_config)
-                .post(handlers::plugin_config_update)
-                .delete(handlers::plugin_config_delete),
+        .nest("/topgg-voter-role", Router::new()
+            .route("/webhook/topgg", post(handlers::topgg_webhook))
+            .route("/health", get(handlers::health))
+            .route("/register", post(handlers::plugin_register))
+            .route(
+                "/config",
+                get(handlers::plugin_config)
+                    .post(handlers::plugin_config_update)
+                    .delete(handlers::plugin_config_delete),
+            )
         )
         .with_state(state);
 

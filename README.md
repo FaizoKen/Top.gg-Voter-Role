@@ -2,6 +2,8 @@
 
 Lightweight Rust backend that receives [Top.gg](https://top.gg) vote webhooks and syncs voter Discord user IDs to [RoleLogic](https://rolelogic.faizo.net) for automatic role assignment. Designed as a RoleLogic plugin with multi-guild support.
 
+> **Note**: This plugin does not require the Auth Gateway — it has no user-facing login flow. It uses webhooks only.
+
 ## How it works
 
 1. **Registers** guild/role pairs via the RoleLogic plugin API
@@ -23,8 +25,8 @@ cp .env.example .env
 
 | Variable             | Required | Default               | Description                                |
 | -------------------- | -------- | --------------------- | ------------------------------------------ |
-| `DATABASE_URL`       | Yes      | —                     | PostgreSQL connection string               |
-| `HOST`               | No       | `0.0.0.0`             | Bind address                               |
+| `DATABASE_URL`       | Yes      | --                    | PostgreSQL connection string               |
+| `HOST`               | No       | `0.0.0.0`            | Bind address                               |
 | `PORT`               | No       | `3000`                | Bind port                                  |
 | `PUBLIC_URL`         | No       | `https://example.com` | Public URL shown in plugin config          |
 | `SYNC_INTERVAL_SECS` | No       | `43200`               | Full sync frequency to RoleLogic (seconds) |
@@ -46,6 +48,8 @@ cargo build --release  # production
 
 ## Endpoints
 
+All routes are nested under `/topgg-voter-role`:
+
 | Method   | Path             | Description                    |
 | -------- | ---------------- | ------------------------------ |
 | `POST`   | `/webhook/topgg` | Top.gg webhook receiver        |
@@ -57,11 +61,11 @@ cargo build --release  # production
 
 ## Usage
 
-1. In the RoleLogic dashboard, create a Role Link and set the **Custom Plugin URL** to your Top.gg Voter Role instance's public URL
+1. In the RoleLogic dashboard, create a Role Link and set the **Custom Plugin URL** to `https://your-domain.com/topgg-voter-role`
 2. RoleLogic will automatically register the guild/role pair with Top.gg Voter Role
 3. Open the plugin config in RoleLogic — it will show your webhook URL and credential fields
 4. In your Top.gg dashboard, paste the webhook URL and copy your webhook secret + API token back into the plugin config
-5. Votes are tracked automatically with configurable TTL (1–168 hours)
+5. Votes are tracked automatically with configurable TTL (1-168 hours)
 
 ## API Reference
 

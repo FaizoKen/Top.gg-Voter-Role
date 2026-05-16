@@ -403,6 +403,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 // ── RoleLogic Member API ────────────────────────────────────────────────────
 
+/// Body substring RoleLogic returns when our token isn't found server-side.
+/// Reliably signals the role link has been deleted upstream (RoleLinkToken
+/// rows cascade on RoleLink delete).
+const RL_LINK_GONE_ERROR_MSG: &str = "Invalid or revoked token";
+
 pub async fn add_member(state: &AppState, reg: &Registration, user_id: &str) {
     let url = format!(
         "https://api-rolelogic.faizo.net/api/role-link/{}/{}/users/{}",
@@ -419,7 +424,11 @@ pub async fn add_member(state: &AppState, reg: &Registration, user_id: &str) {
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            error!("RoleLogic add member failed ({status}): {text}");
+            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
+                delete_orphan_registration(state, reg).await;
+            } else {
+                error!("RoleLogic add member failed ({status}): {text}");
+            }
         }
         Err(e) => {
             error!("RoleLogic add member request error: {e}");
@@ -444,11 +453,30 @@ pub async fn remove_member(state: &AppState, reg: &Registration, user_id: &str) 
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            error!("RoleLogic remove member failed ({status}): {text}");
+            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
+                delete_orphan_registration(state, reg).await;
+            } else {
+                error!("RoleLogic remove member failed ({status}): {text}");
+            }
         }
         Err(e) => {
             error!("RoleLogic remove member request error: {e}");
         }
+    }
+}
+
+/// Drop the local registration when RoleLogic reports the role link is gone.
+/// CASCADE on voters keeps state consistent. Best-effort: logs DB failures
+/// without propagating.
+pub async fn delete_orphan_registration(state: &AppState, reg: &Registration) {
+    warn!(
+        guild_id = %reg.guild_id,
+        role_id = %reg.role_id,
+        reg_id = %reg.id,
+        "Role link gone on RoleLogic; deleting orphan registration"
+    );
+    if let Err(e) = db::delete_registration(&state.db, &reg.guild_id, &reg.role_id).await {
+        error!(reg_id = %reg.id, "Failed to delete orphan registration: {e}");
     }
 }
 

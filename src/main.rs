@@ -64,6 +64,7 @@ async fn main() {
 
     let app = Router::new()
         .nest("/topgg-voter-role", Router::new()
+            .route("/dweeb/status", get(handlers::dweeb_status))
             .route("/webhook/topgg", post(handlers::topgg_webhook))
             .route("/health", get(handlers::health))
             .route("/register", post(handlers::plugin_register))

@@ -407,6 +407,38 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
 /// Reliably signals the role link has been deleted upstream (RoleLinkToken
 /// rows cascade on RoleLink delete).
 const RL_LINK_GONE_ERROR_MSG: &str = "Invalid or revoked token";
+/// Body substring RoleLogic returns when the link exists but its owner turned
+/// it off. Not a deletion: keep the registration and let the next full sync
+/// after it's turned back on resend the list. Source: `role-link-token.guard.ts`.
+const RL_LINK_DISABLED_ERROR_MSG: &str = "This role link is disabled";
+/// Body prefix RoleLogic returns when the link is beyond the guild's
+/// integration-slot quota (e.g. after a plan downgrade). Every endpoint rejects
+/// it exactly like a disabled link until the owner upgrades or frees a slot.
+const RL_LINK_PAUSED_ERROR_MSG: &str = "This role link is paused";
+
+/// Link-state rejections every RoleLogic role-link endpoint shares.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LinkRejection {
+    /// Link deleted upstream — drop the local registration.
+    Gone,
+    /// Link disabled or paused by its owner — expected state, skip it.
+    Inactive,
+}
+
+/// Classify a RoleLogic error response. `None` means it isn't a link-state
+/// rejection and the caller should treat it as a real failure.
+pub fn link_rejection(status: StatusCode, body: &str) -> Option<LinkRejection> {
+    if status != StatusCode::FORBIDDEN {
+        return None;
+    }
+    if body.contains(RL_LINK_GONE_ERROR_MSG) {
+        return Some(LinkRejection::Gone);
+    }
+    if body.contains(RL_LINK_DISABLED_ERROR_MSG) || body.contains(RL_LINK_PAUSED_ERROR_MSG) {
+        return Some(LinkRejection::Inactive);
+    }
+    None
+}
 
 pub async fn add_member(state: &AppState, reg: &Registration, user_id: &str) {
     let url = format!(
@@ -424,10 +456,14 @@ pub async fn add_member(state: &AppState, reg: &Registration, user_id: &str) {
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
-                delete_orphan_registration(state, reg).await;
-            } else {
-                error!("RoleLogic add member failed ({status}): {text}");
+            match link_rejection(status, &text) {
+                Some(LinkRejection::Gone) => delete_orphan_registration(state, reg).await,
+                // The vote is stored; the next full sync after the link is back
+                // on pushes it.
+                Some(LinkRejection::Inactive) => {
+                    info!("RoleLogic add member skipped for reg {}: role link is disabled or paused", reg.id);
+                }
+                None => error!("RoleLogic add member failed ({status}): {text}"),
             }
         }
         Err(e) => {
@@ -453,10 +489,12 @@ pub async fn remove_member(state: &AppState, reg: &Registration, user_id: &str) 
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
-                delete_orphan_registration(state, reg).await;
-            } else {
-                error!("RoleLogic remove member failed ({status}): {text}");
+            match link_rejection(status, &text) {
+                Some(LinkRejection::Gone) => delete_orphan_registration(state, reg).await,
+                Some(LinkRejection::Inactive) => {
+                    info!("RoleLogic remove member skipped for reg {}: role link is disabled or paused", reg.id);
+                }
+                None => error!("RoleLogic remove member failed ({status}): {text}"),
             }
         }
         Err(e) => {

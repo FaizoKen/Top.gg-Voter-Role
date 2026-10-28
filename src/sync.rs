@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
-use reqwest::StatusCode;
 use tracing::{error, info, warn};
 
+use crate::handlers::{LinkRejection, link_rejection};
 use crate::{AppState, db, handlers, models::*};
 
 /// Hard cap for a single `PUT /users` request (server-side limit).
@@ -15,9 +15,6 @@ const CHUNK_SIZE: usize = 100_000;
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Per-request timeout for the commit POST (server may take ~30 minutes).
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// Body substring RoleLogic returns when our token isn't found server-side.
-/// Reliably signals the role link has been deleted upstream.
-const RL_LINK_GONE_ERROR_MSG: &str = "Invalid or revoked token";
 
 // ── Background Loops ────────────────────────────────────────────────────────
 
@@ -106,10 +103,15 @@ async fn remove_member_raw(
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
-                return true;
+            match link_rejection(status, &text) {
+                Some(LinkRejection::Gone) => return true,
+                // The voter row is already deleted locally, so the next full
+                // sync after the link is back on drops them upstream.
+                Some(LinkRejection::Inactive) => {
+                    info!("RoleLogic remove member skipped: role link is disabled or paused ({user_id})");
+                }
+                None => error!("RoleLogic remove member failed ({status}): {text}"),
             }
-            error!("RoleLogic remove member failed ({status}): {text}");
             false
         }
         Err(e) => {
@@ -153,8 +155,12 @@ pub async fn sync_single_registration(state: &AppState, reg: &Registration) {
     // 3. Sync to RoleLogic — uses chunked upload for sets > 100k voters.
     info!("Syncing {} voter(s) to RoleLogic for reg {}", user_ids.len(), reg.id);
 
-    if let Err(SyncError::RoleLinkGone) = upload_voters(state, reg, &user_ids).await {
-        handlers::delete_orphan_registration(state, reg).await;
+    match upload_voters(state, reg, &user_ids).await {
+        Err(SyncError::RoleLinkGone) => handlers::delete_orphan_registration(state, reg).await,
+        Err(SyncError::RoleLinkInactive) => {
+            info!("Skipping RoleLogic sync for reg {}: role link is disabled or paused", reg.id);
+        }
+        Ok(()) | Err(SyncError::Other) => {}
     }
 }
 
@@ -162,8 +168,20 @@ pub async fn sync_single_registration(state: &AppState, reg: &Registration) {
 enum SyncError {
     /// RoleLogic reported 403 + "Invalid or revoked token" — link is gone.
     RoleLinkGone,
+    /// RoleLogic reported the link disabled or paused — the owner's choice,
+    /// not a failure. Keep the registration; the next sync retries.
+    RoleLinkInactive,
     /// Any other RoleLogic / network failure (already logged at source).
     Other,
+}
+
+impl From<LinkRejection> for SyncError {
+    fn from(rejection: LinkRejection) -> Self {
+        match rejection {
+            LinkRejection::Gone => SyncError::RoleLinkGone,
+            LinkRejection::Inactive => SyncError::RoleLinkInactive,
+        }
+    }
 }
 
 /// Pushes the user list to RoleLogic, picking the right transport:
@@ -225,8 +243,8 @@ async fn replace_voters_put(state: &AppState, reg: &Registration, user_ids: &[St
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
-                return Err(SyncError::RoleLinkGone);
+            if let Some(rejection) = link_rejection(status, &text) {
+                return Err(rejection.into());
             }
             error!("RoleLogic sync failed for reg {} ({status}): {text}", reg.id);
             Err(SyncError::Other)
@@ -263,8 +281,8 @@ async fn start_upload(state: &AppState, reg: &Registration) -> Result<String, Sy
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status == StatusCode::FORBIDDEN && text.contains(RL_LINK_GONE_ERROR_MSG) {
-                return Err(SyncError::RoleLinkGone);
+            if let Some(rejection) = link_rejection(status, &text) {
+                return Err(rejection.into());
             }
             error!("Start upload failed for reg {} ({status}): {text}", reg.id);
             Err(SyncError::Other)

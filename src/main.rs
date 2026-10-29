@@ -9,9 +9,15 @@ use axum::{
     routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
-use std::{env, time::Duration};
+use std::{
+    collections::HashSet,
+    env,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tracing::info;
+use uuid::Uuid;
 
 // ── AppState ────────────────────────────────────────────────────────────────
 
@@ -21,6 +27,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub sync_interval: Duration,
     pub public_url: String,
+    /// Registrations whose list write RoleLogic is holding and that already
+    /// have a re-check booked (`sync::recheck_held`).
+    pub held_rechecks: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -53,6 +62,7 @@ async fn main() {
         http: reqwest::Client::new(),
         sync_interval,
         public_url,
+        held_rechecks: Arc::new(Mutex::new(HashSet::new())),
     };
 
     // Spawn background tasks

@@ -15,6 +15,19 @@ const CHUNK_SIZE: usize = 100_000;
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Per-request timeout for the commit POST (server may take ~30 minutes).
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// 409 body marker for a list write held by RoleLogic's shrink gate until an
+/// owner confirms the removals. Source: `RoleLinkService.assertShrinkAllowed`.
+const RL_CONFIRM_REQUIRED: &str = "confirm_required";
+/// How soon a held write is tried again. Confirming the removals in the
+/// RoleLogic dashboard lets the next write through for an hour, and the full
+/// sync otherwise runs only every `SYNC_INTERVAL_SECS` (12 h by default), so
+/// the re-check has to land inside that hour.
+const HELD_RECHECK: Duration = Duration::from_secs(20 * 60);
+
+/// A 409 for a list write the shrink gate is holding.
+fn removal_held(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::CONFLICT && body.contains(RL_CONFIRM_REQUIRED)
+}
 
 // ── Background Loops ────────────────────────────────────────────────────────
 
@@ -160,8 +173,37 @@ pub async fn sync_single_registration(state: &AppState, reg: &Registration) {
         Err(SyncError::RoleLinkInactive) => {
             info!("Skipping RoleLogic sync for reg {}: role link is disabled or paused", reg.id);
         }
+        Err(SyncError::RemovalHeld) => recheck_held(state, reg),
         Ok(()) | Err(SyncError::Other) => {}
     }
+}
+
+/// RoleLogic is holding this registration's write until an owner confirms
+/// the removals (Safe Apply's shrink gate). That is a decision waiting on a
+/// person, not a failure: sync it again in `HELD_RECHECK`, recomputing the
+/// list then. Only one re-check per registration waits at a time, so the
+/// periodic loop and config saves don't start extra chains.
+fn recheck_held(state: &AppState, reg: &Registration) {
+    if !state.held_rechecks.lock().unwrap().insert(reg.id) {
+        return;
+    }
+    info!(
+        "RoleLogic is holding removals for reg {} until its owner confirms them; re-checking in {} min",
+        reg.id,
+        HELD_RECHECK.as_secs() / 60
+    );
+    let state = state.clone();
+    let (id, guild_id, role_id) = (reg.id, reg.guild_id.clone(), reg.role_id.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(HELD_RECHECK).await;
+        state.held_rechecks.lock().unwrap().remove(&id);
+        // Re-read it: the owner may have changed or removed it meanwhile.
+        match db::get_registration_by_guild_role(&state.db, &guild_id, &role_id).await {
+            Ok(Some(reg)) => sync_single_registration(&state, &reg).await,
+            Ok(None) => {}
+            Err(e) => error!("Failed to reload reg {id} for its held re-check: {e}"),
+        }
+    });
 }
 
 #[derive(Debug)]
@@ -171,6 +213,9 @@ enum SyncError {
     /// RoleLogic reported the link disabled or paused — the owner's choice,
     /// not a failure. Keep the registration; the next sync retries.
     RoleLinkInactive,
+    /// RoleLogic's shrink gate is holding the write until an owner confirms
+    /// the removals — a decision waiting on a person, re-checked on a timer.
+    RemovalHeld,
     /// Any other RoleLogic / network failure (already logged at source).
     Other,
 }
@@ -245,6 +290,9 @@ async fn replace_voters_put(state: &AppState, reg: &Registration, user_ids: &[St
             let text = resp.text().await.unwrap_or_default();
             if let Some(rejection) = link_rejection(status, &text) {
                 return Err(rejection.into());
+            }
+            if removal_held(status, &text) {
+                return Err(SyncError::RemovalHeld);
             }
             error!("RoleLogic sync failed for reg {} ({status}): {text}", reg.id);
             Err(SyncError::Other)
@@ -348,6 +396,9 @@ async fn commit_upload(state: &AppState, reg: &Registration, upload_id: &str) ->
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            if removal_held(status, &text) {
+                return Err(SyncError::RemovalHeld);
+            }
             error!("Commit upload failed for reg {} ({status}): {text}", reg.id);
             Err(SyncError::Other)
         }
@@ -432,4 +483,20 @@ async fn fetch_topgg_votes(
     }
 
     Ok(seen.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    // As RoleLogic sends it (RoleLinkService.assertShrinkAllowed).
+    const HELD: &str = r#"{"errors":{"error":"confirm_required","code":"shrink","change_id":"c","previous":2,"next":0,"removals":2}}"#;
+
+    #[test]
+    fn a_shrink_hold_is_only_a_409_confirm_required() {
+        assert!(removal_held(StatusCode::CONFLICT, HELD));
+        assert!(!removal_held(StatusCode::CONFLICT, r#"{"errors":"Upload already in progress"}"#));
+        assert!(!removal_held(StatusCode::FORBIDDEN, HELD));
+    }
 }
